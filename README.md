@@ -1,129 +1,152 @@
-# 🎙️ Modern Voice Cloner (Flow Matching DiT)
+# 🎙️ Modern Voice Cloner (Flow Matching DiT & Voice-to-Voice)
 
-Sistema moderno de clonagem de voz baseado em **Flow Matching** (Continuous Normalizing Flows com Optimal Transport) e **Diffusion Transformers (DiT)** com modulação AdaLN e vocoder neural a 24kHz.
+A modern, high-fidelity voice cloning and speech conversion system based on **Continuous Normalizing Flows (Optimal Transport Flow Matching - OT-CFM)**, **Diffusion Transformers (DiT)** with AdaLN modulation, and a **24kHz Neural Vocoder (Vocos)**. Accelerated via hardware on **NVIDIA GeForce RTX CUDA GPUs**.
 
-Comparado ao **RVC** e **so-vits-svc**, este sistema traz avanços significativos:
-- **Zero-Shot Real**: Clona qualquer voz com apenas 3 a 10 segundos de áudio de referência, sem necessidade de treinar previamente.
-- **Fine-Tuning Rápido**: Suporte a treinamento com poucos minutos de áudio para fidelidade máxima de timbre e prosódia.
-- **Livre de artefatos robóticos**: Elimina os sons metálicos característicos de vocoders antigos.
-- **Alta Definição**: Áudio a 24kHz com suporte ao vocoder neural Vocos.
+Compared to traditional tools like **RVC** and **so-vits-svc**, this system delivers major advancements:
+- **True Zero-Shot Voice Cloning**: Clone any voice using just 3 to 10 seconds of reference audio—no prior training required.
+- **Dual Operating Modes**: Full support for both **Text-to-Speech (TTS)** and **Audio-to-Audio (Voice-to-Voice Conversion)** with GPU-accelerated Whisper ASR.
+- **Artifact-Free Speech**: Eliminates the robotic, metallic timbre characteristic of older neural vocoders.
+- **Native Brazilian Portuguese (PT-BR) & Multilingual Support**: Specialized foundation weights for natural pronunciation of accents and nasal vowels (`ã`, `õ`, `é`, `ó`, `ç`), plus English/multilingual base models.
+- **High Definition Audio**: 24,000 Hz sample rate powered by the Vocos neural vocoder.
+- **Fast Fine-Tuning**: Support for training custom voice models with local audio datasets, Exponential Moving Average (EMA), and Automatic Mixed Precision (AMP).
 
 ---
 
-## 📁 Estrutura do Projeto
+## 📁 Project Structure
 
 ```
 voice_cloner/
 ├── configs/
-│   └── default_config.yaml     # Configurações do modelo, áudio e treino
+│   └── default_config.yaml         # Model, audio, and training hyperparameters
 ├── models/
-│   ├── dit.py                  # Diffusion Transformer com AdaLN e Multi-Head Attention
-│   ├── flow_matching.py        # OT-CFM (Optimal Transport Flow Matching) e amostragem ODE
-│   ├── text_encoder.py         # Tokenizer UTF-8 multilingue e encoder ConvNeXt
-│   └── vocoder.py              # Vocoder neural Vocos (24kHz) com fallback Griffin-Lim
+│   ├── dit.py                      # Diffusion Transformer with AdaLN-Zero & Multi-Head Attention
+│   ├── flow_matching.py            # OT-CFM (Optimal Transport Flow Matching) & ODE samplers
+│   ├── text_encoder.py             # UTF-8 tokenizer & ConvNeXt text encoder
+│   └── vocoder.py                  # 24kHz Vocos neural vocoder with Griffin-Lim fallback
 ├── dataset/
-│   ├── preprocessor.py         # Resampling a 24kHz, extração de Mel e normalização
-│   └── audio_dataset.py        # PyTorch Dataset e Collate com padding dinâmico
+│   ├── preprocessor.py             # 24kHz resampling, Mel-spectrogram extraction & normalization
+│   └── audio_dataset.py            # PyTorch Dataset & Collate function with dynamic padding
 ├── training/
-│   └── train.py                # Script completo de treino/fine-tuning com EMA e AMP
+│   └── train.py                    # Complete training/fine-tuning pipeline with EMA & AMP
 ├── inference/
-│   ├── cloner.py               # Motor de inferência Zero-Shot e carregador de pesos
-│   └── infer.py                # Interface de linha de comando (CLI)
-├── app.py                      # Interface Web interativa em Gradio
-├── requirements.txt            # Dependências Python
+│   ├── cloner.py                   # Main inference engine (TTS, Voice Conversion & Whisper ASR)
+│   └── infer.py                    # Command-Line Interface (CLI)
+├── gui_pyqt.py                     # Native desktop GUI built with PyQt6 (Dark Theme)
+├── start_gui.bat                   # 1-Click launcher script for Windows
+├── DOCUMENTACAO_E_HISTORICO.md     # Detailed architecture documentation & issue resolution log
+├── requirements.txt                # Python dependencies
 └── README.md
 ```
 
 ---
 
-## 🚀 Instalação e Ambiente Virtual (`venv`)
+## 🚀 Installation & Virtual Environment (`venv`)
 
-### 1. Criar e Ativar o Ambiente Virtual
+### 1. Create and Activate Virtual Environment
 
-No Windows (PowerShell):
+On Windows (PowerShell):
 ```powershell
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 ```
 
-### 2. Instalar as Dependências
+### 2. Install PyTorch with CUDA & Dependencies
 
+For NVIDIA GPUs (CUDA 12.x):
 ```powershell
-pip install torch torchaudio --extra-index-url https://download.pytorch.org/whl/cu121
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 ```
 
 ---
 
-## 🔊 Como Usar - Inferência e Clonagem
+## 🔊 How to Use
 
-### Opção A: Interface Desktop Nativa (PyQt6)
+### Option A: Native Desktop GUI (PyQt6) - Recommended
 
-Basta dar **dois cliques** no arquivo [`start_gui.bat`](file:///f:/workspace/voice_cloner/start_gui.bat) ou executar no terminal:
+Simply **double-click** the [`start_gui.bat`](file:///f:/workspace/voice_cloner/start_gui.bat) file or run in terminal:
 ```powershell
 .\start_gui.bat
-# ou: .\venv\Scripts\python.exe gui_pyqt.py
+# or: .\venv\Scripts\python.exe gui_pyqt.py
 ```
-A janela nativa Desktop do PyQt abrirá com tema moderno escuro (Dark Theme), permitindo:
-1. **Aba de Clonagem / Síntese**: Escolher áudio de referência, digitar o texto, ouvir o áudio gerado diretamente pelo app e salvar em WAV.
-2. **Aba de Treinamento**: Selecionar pasta de dataset, definir épocas/batch size e acompanhar logs e progresso em tempo real sem travar a interface.
-3. **Aba de Informações**: Status da aceleração de hardware (NVIDIA CUDA / GPU).
 
-*(Obs: Se desejar a interface Web Gradio antiga no navegador, execute `.\venv\Scripts\python.exe app.py`)*
+The PyQt6 Desktop window opens with a dark theme, providing:
+1. **💬 Text-to-Speech (TTS) Tab**: Enter any text, select a 3-10s reference audio, select the base model/language (`🇧🇷 PT-BR` or `🇺🇸 English`), synthesize in < 2 seconds, and listen/export to WAV.
+2. **🔄 Audio-to-Audio (Voice-to-Voice) Tab**: Select any spoken or sung source audio, choose the target voice sample, and automatically transform the speech into the target voice using Whisper ASR on GPU.
+3. **🏋️ Training / Fine-Tuning Tab**: Pick a local dataset directory, configure epochs/batch size/learning rate, and monitor live logs and progress bars asynchronously without UI freezing.
+4. **ℹ️ Info & Hardware Tab**: Live status detection of NVIDIA CUDA GPU acceleration (e.g. RTX 4090).
 
 ---
 
-### Opção B: Linha de Comando (CLI)
+### Option B: Command-Line Interface (CLI)
 
-Clone uma voz rapidamente através do terminal:
+#### 1. Text-to-Speech (TTS Voice Cloning):
 ```powershell
 .\venv\Scripts\python.exe inference/infer.py `
-    --ref_audio "caminho/para/audio_referencia.wav" `
-    --text "Olá! Esta é uma demonstração de clonagem de voz moderna com Flow Matching." `
-    --output "resultado.wav" `
+    --ref_audio "data/demo_speaker/audio_01.wav" `
+    --text "Hello! This is a voice cloning demonstration using Flow Matching DiT." `
+    --output "output_tts.wav" `
+    --language "pt-br" `
     --steps 32 `
     --cfg 2.0
 ```
 
----
-
-### Opção C: Uso Direto no Código Python
-
-```python
-from inference.cloner import VoiceCloner
-
-# Inicializa o clonador (com ou sem checkpoint treinado)
-cloner = VoiceCloner(checkpoint_path="checkpoints/best_model.pt")
-
-# Clona a voz a partir de uma amostra de referência
-waveform, sr = cloner.clone_voice(
-    ref_audio_path="amostra_voz.wav",
-    text="Texto sintetizado com a voz clonada.",
-    output_path="saida_clonada.wav",
-    speed=1.0,
-    n_steps=32,
-    cfg_strength=2.0
-)
+#### 2. Audio-to-Audio (Voice-to-Voice Conversion):
+```powershell
+.\venv\Scripts\python.exe inference/infer.py `
+    --source_audio "my_recording.wav" `
+    --ref_audio "target_voice.wav" `
+    --output "output_converted.wav" `
+    --language "pt-br"
 ```
 
 ---
 
-## 🏋️ Como Treinar / Fazer Fine-Tuning
+### Option C: Direct Python API Usage
 
-### Preparação do Dataset
-Coloque seus arquivos de áudio (`.wav`, `.mp3`) dentro de uma pasta (ex: `data/`), opcionalmente acompanhados por arquivos de texto com o mesmo nome contendo a transcrição (`exemplo01.wav` e `exemplo01.txt`), ou passe um arquivo `metadata.json` / `metadata.csv`.
+```python
+from inference.cloner import VoiceCloner
 
-### Executando o Treinamento:
+# 1. Initialize cloner (defaults to PT-BR foundation weights on CUDA)
+cloner = VoiceCloner(language="pt-br")
+
+# 2. Mode 1: Text-to-Speech Voice Cloning
+waveform, sr = cloner.clone_voice(
+    ref_audio_path="target_speaker.wav",
+    text="Texto sintetizado com a voz clonada em português nativo.",
+    output_path="tts_result.wav",
+    speed=1.0,
+    n_steps=32,
+    cfg_strength=2.0
+)
+
+# 3. Mode 2: Audio-to-Audio Voice Conversion
+waveform, sr, transcribed_text = cloner.convert_voice(
+    source_audio_path="source_speech.wav",
+    target_ref_audio="target_speaker.wav",
+    output_path="v2v_result.wav"
+)
+print("Recognized speech:", transcribed_text)
+```
+
+---
+
+## 🏋️ Training & Fine-Tuning Custom Voices
+
+### Dataset Preparation
+Place audio files (`.wav`, `.mp3`, `.flac`) inside a directory (e.g., `data/my_speaker/`). Optionally, add companion text files with identical basenames (`audio01.wav` and `audio01.txt`) containing transcripts.
+
+### Starting Training:
 ```powershell
 .\venv\Scripts\python.exe training/train.py `
-    --data_dir "data" `
+    --data_dir "data/my_speaker" `
     --epochs 50 `
     --batch_size 8 `
     --lr 0.0002
 ```
 
-O treinamento utiliza:
-- **Optimal Transport CFM**: Aprendizado por fluxo vetorial contínuo.
-- **EMA (Exponential Moving Average)**: Suavização exponencial dos pesos para geração auditiva límpida.
-- **Automatic Mixed Precision (AMP)**: Alta velocidade e economia de VRAM em GPUs NVIDIA RTX.
-- **Checkpoints**: Salvos periodicamente no diretório `checkpoints/`.
+The training engine utilizes:
+- **Optimal Transport CFM**: Continuous probability flow matching for fast convergence.
+- **Exponential Moving Average (EMA)**: Weight smoothing for crystal-clear auditory synthesis.
+- **Automatic Mixed Precision (AMP)**: High speed and low VRAM footprint on NVIDIA RTX GPUs.
+- **Checkpoints**: Saved periodically in `checkpoints/`.

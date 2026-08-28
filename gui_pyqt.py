@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from inference.cloner import VoiceCloner
+from inference.voice_library import VoiceLibrary
 from training.train import Trainer, EMA
 from dataset.audio_dataset import VoiceCloningDataset, voice_cloning_collate_fn
 from torch.utils.data import DataLoader
@@ -457,9 +458,10 @@ class VoiceClonerMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🎙️ Clonador de Voz Moderno (Flow Matching DiT)")
-        # 940px e a altura em que a aba de Troca de Falante cabe inteira sem
-        # rolagem; fit_to_screen() reduz depois se o monitor for menor.
-        self.resize(1020, 940)
+        # 980px e a altura em que a aba de Troca de Falante cabe inteira sem
+        # rolagem; fit_to_screen() reduz depois se o monitor for menor, e a area
+        # rolavel cobre o resto.
+        self.resize(1020, 980)
         self.setMinimumSize(880, 600)
         self.setStyleSheet(DARK_STYLESHEET)
 
@@ -468,6 +470,10 @@ class VoiceClonerMainWindow(QMainWindow):
         self.last_converted_audio = None
         self.last_swapped_audio = None
         self.speaker_samples = {}
+        self.library = VoiceLibrary()
+        # Combos de personagem espalhados pelas abas, para atualizar todos de
+        # uma vez quando a biblioteca mudar.
+        self._combos_personagem = []
         self.init_ui()
         self.check_gpu_status()
         self.fit_to_screen()
@@ -498,26 +504,38 @@ class VoiceClonerMainWindow(QMainWindow):
         self.tab_inference = QWidget()
         self.tab_vc = QWidget()
         self.tab_swap = QWidget()
+        self.tab_characters = QWidget()
         self.tab_training = QWidget()
         self.tab_about = QWidget()
 
         self.setup_inference_tab()
         self.setup_vc_tab()
         self.setup_swap_tab()
+        self.setup_characters_tab()
         self.setup_training_tab()
         self.setup_about_tab()
 
         self.tabs.addTab(self.tab_inference, "💬 Texto para Voz (TTS)")
         self.tabs.addTab(self.tab_vc, "🔄 Áudio para Áudio (Voice-to-Voice)")
         self.tabs.addTab(self.tab_swap, "🎭 Troca de Falante (Conversa)")
+        self.tabs.addTab(self.tab_characters, "👥 Personagens")
         self.tabs.addTab(self.tab_training, "🏋️ Treinamento / Fine-Tuning")
         self.tabs.addTab(self.tab_about, "ℹ️ Informações & Status")
+        self.tabs.currentChanged.connect(self.on_tab_changed)
         main_layout.addWidget(self.tabs)
 
         # Status Bar Inferior
         self.status_bar = QLabel("Pronto para clonar e converter vozes.")
         self.status_bar.setStyleSheet("color: #71717A; font-size: 11px; padding: 4px;")
         main_layout.addWidget(self.status_bar)
+
+    def on_tab_changed(self, indice: int):
+        """
+        Ao sair da aba de Personagens, os seletores das outras abas precisam
+        refletir o que foi criado ou removido lá.
+        """
+        if self.tabs.widget(indice) is not self.tab_characters:
+            self.refresh_character_combos()
 
     def fit_to_screen(self):
         """
@@ -545,6 +563,68 @@ class VoiceClonerMainWindow(QMainWindow):
         else:
             self.gpu_badge.setText("🖥️ Dispositivo: CPU")
 
+    def _linha_personagem(self, campo_arquivo: QLineEdit, campo_texto: QLineEdit | None = None) -> QHBoxLayout:
+        """
+        Monta a linha "Personagem: [combo]" que aparece acima do campo de
+        arquivo nas abas que pedem uma voz de referência.
+
+        Escolher um personagem resolve a referência dele (juntando os áudios, se
+        houver mais de um) e preenche o campo de arquivo — assim o resto do
+        pipeline continua recebendo um caminho, sem saber da biblioteca.
+        """
+        linha = QHBoxLayout()
+        linha.addWidget(QLabel("Personagem:"))
+
+        combo = QComboBox()
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(14)
+        combo.setToolTip("Vozes salvas na aba 👥 Personagens. Escolher uma preenche o arquivo abaixo.")
+        linha.addWidget(combo, 1)
+
+        aviso = QLabel("")
+        aviso.setStyleSheet("color: #71717A; font-size: 11px; font-weight: normal;")
+        linha.addWidget(aviso, 2)
+
+        def ao_escolher():
+            nome = combo.currentData()
+            if not nome:
+                aviso.setText("")
+                return
+            try:
+                caminho = self.library.referencia(nome)
+            except ValueError as e:
+                aviso.setText("⚠️ sem áudio válido")
+                aviso.setStyleSheet("color: #FFB020; font-size: 11px; font-weight: bold;")
+                QMessageBox.warning(self, "Personagem sem áudio", str(e))
+                combo.setCurrentIndex(0)
+                return
+            campo_arquivo.setText(caminho)
+            aviso.setText(f"✓ {self.library.resumo(nome)}")
+            aviso.setStyleSheet("color: #00E676; font-size: 11px; font-weight: normal;")
+            personagem = self.library.obter(nome)
+            if campo_texto is not None and personagem is not None and personagem.ref_text:
+                campo_texto.setText(personagem.ref_text)
+
+        combo.currentIndexChanged.connect(ao_escolher)
+        self._combos_personagem.append((combo, aviso))
+        return linha
+
+    def refresh_character_combos(self):
+        """Repopula os seletores de personagem sem perder a escolha atual."""
+        nomes = self.library.nomes()
+        for combo, aviso in self._combos_personagem:
+            anterior = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("— escolher arquivo manualmente —", None)
+            for nome in nomes:
+                combo.addItem(nome, nome)
+            indice = combo.findData(anterior) if anterior else 0
+            combo.setCurrentIndex(indice if indice >= 0 else 0)
+            combo.blockSignals(False)
+            if indice <= 0:
+                aviso.setText("")
+
     def setup_inference_tab(self):
         layout = QVBoxLayout(self.tab_inference)
         layout.setSpacing(12)
@@ -568,6 +648,8 @@ class VoiceClonerMainWindow(QMainWindow):
         self.ref_text_edit = QLineEdit()
         self.ref_text_edit.setPlaceholderText("O que a pessoa fala no áudio de referência? (Opcional, deixe vazio para automático)")
         ref_vlayout.addWidget(self.ref_text_edit)
+
+        ref_vlayout.insertLayout(0, self._linha_personagem(self.ref_path_edit, self.ref_text_edit))
         layout.addWidget(ref_group)
 
         # Grupo 2: Texto Desejado
@@ -679,6 +761,8 @@ class VoiceClonerMainWindow(QMainWindow):
         self.vc_tgt_text_edit = QLineEdit()
         self.vc_tgt_text_edit.setPlaceholderText("O que a pessoa alvo fala no áudio de exemplo? (Opcional)")
         tgt_vlayout.addWidget(self.vc_tgt_text_edit)
+
+        tgt_vlayout.insertLayout(0, self._linha_personagem(self.vc_tgt_edit, self.vc_tgt_text_edit))
         layout.addWidget(tgt_group)
 
         # Parâmetros VC
@@ -870,6 +954,8 @@ class VoiceClonerMainWindow(QMainWindow):
         self.sw_tgt_text_edit = QLineEdit()
         self.sw_tgt_text_edit.setPlaceholderText("O que a voz nova fala na amostra? (Opcional)")
         tgt_vlayout.addWidget(self.sw_tgt_text_edit)
+
+        tgt_vlayout.insertLayout(0, self._linha_personagem(self.sw_tgt_edit, self.sw_tgt_text_edit))
         layout.addWidget(tgt_group)
 
         # Grupo 4: parametros
@@ -1179,6 +1265,218 @@ class VoiceClonerMainWindow(QMainWindow):
         self.sw_progress_bar.setVisible(False)
         self.status_bar.setText("Erro na troca de falante.")
         QMessageBox.critical(self, "Erro na Troca de Falante", f"Ocorreu um erro:\n{err_msg}")
+
+    def setup_characters_tab(self):
+        layout = QVBoxLayout(self.tab_characters)
+        layout.setSpacing(10)
+
+        explicacao = QLabel(
+            "Junte um ou mais áudios sob o nome de um personagem. "
+            "Depois é só escolher o personagem nas outras abas, sem procurar arquivo. "
+            "Com vários áudios, eles são emendados numa referência única (até 25s), "
+            "o que costuma melhorar a clonagem."
+        )
+        explicacao.setWordWrap(True)
+        explicacao.setStyleSheet("color: #A1A1AA; font-size: 12px;")
+        layout.addWidget(explicacao)
+
+        colunas = QHBoxLayout()
+
+        # --- coluna esquerda: personagens
+        grupo_pers = QGroupBox("Personagens")
+        vbox_pers = QVBoxLayout(grupo_pers)
+        self.ch_list = QListWidget()
+        self.ch_list.setMinimumWidth(180)
+        self.ch_list.currentItemChanged.connect(self.on_character_selected)
+        vbox_pers.addWidget(self.ch_list)
+
+        botoes_pers = QHBoxLayout()
+        btn_novo = QPushButton("➕ Novo")
+        btn_novo.clicked.connect(self.on_character_new)
+        self.ch_rename_btn = QPushButton("✏️ Renomear")
+        self.ch_rename_btn.clicked.connect(self.on_character_rename)
+        self.ch_delete_btn = QPushButton("🗑️ Remover")
+        self.ch_delete_btn.clicked.connect(self.on_character_delete)
+        for b in (btn_novo, self.ch_rename_btn, self.ch_delete_btn):
+            botoes_pers.addWidget(b)
+        vbox_pers.addLayout(botoes_pers)
+        colunas.addWidget(grupo_pers, 1)
+
+        # --- coluna direita: audios do personagem
+        grupo_audios = QGroupBox("Áudios do personagem")
+        vbox_audios = QVBoxLayout(grupo_audios)
+
+        self.ch_info_lbl = QLabel("Selecione ou crie um personagem.")
+        self.ch_info_lbl.setStyleSheet("color: #A1A1AA; font-size: 12px; font-weight: normal;")
+        vbox_audios.addWidget(self.ch_info_lbl)
+
+        self.ch_files_list = QListWidget()
+        self.ch_files_list.setMinimumWidth(300)
+        self.ch_files_list.itemDoubleClicked.connect(self.on_character_play_file)
+        vbox_audios.addWidget(self.ch_files_list)
+
+        botoes_audio = QHBoxLayout()
+        self.ch_add_btn = QPushButton("📁 Adicionar áudios...")
+        self.ch_add_btn.clicked.connect(self.on_character_add_files)
+        self.ch_play_btn = QPushButton("▶️ Ouvir")
+        self.ch_play_btn.clicked.connect(self.on_character_play_file)
+        self.ch_remove_file_btn = QPushButton("➖ Remover do personagem")
+        self.ch_remove_file_btn.clicked.connect(self.on_character_remove_file)
+        for b in (self.ch_add_btn, self.ch_play_btn, self.ch_remove_file_btn):
+            botoes_audio.addWidget(b)
+        vbox_audios.addLayout(botoes_audio)
+
+        self.ch_reftext_edit = QLineEdit()
+        self.ch_reftext_edit.setPlaceholderText(
+            "Transcrição do áudio (opcional — só o motor F5-TTS usa; o Seed-VC não precisa)"
+        )
+        self.ch_reftext_edit.editingFinished.connect(self.on_character_reftext_saved)
+        vbox_audios.addWidget(self.ch_reftext_edit)
+
+        colunas.addLayout(QVBoxLayout()) if False else None
+        colunas.addWidget(grupo_audios, 2)
+        layout.addLayout(colunas)
+
+        self.refresh_character_list()
+
+    # --- Handlers da aba de personagens -------------------------------------
+
+    def personagem_selecionado(self) -> str | None:
+        item = self.ch_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def refresh_character_list(self, selecionar: str | None = None):
+        anterior = selecionar or self.personagem_selecionado()
+        self.ch_list.blockSignals(True)
+        self.ch_list.clear()
+        for nome in self.library.nomes():
+            item = QListWidgetItem(f"{nome}  ({self.library.resumo(nome)})")
+            item.setData(Qt.ItemDataRole.UserRole, nome)
+            self.ch_list.addItem(item)
+        self.ch_list.blockSignals(False)
+
+        if anterior:
+            for i in range(self.ch_list.count()):
+                if self.ch_list.item(i).data(Qt.ItemDataRole.UserRole) == anterior:
+                    self.ch_list.setCurrentRow(i)
+                    break
+        elif self.ch_list.count():
+            self.ch_list.setCurrentRow(0)
+
+        self.on_character_selected()
+        self.refresh_character_combos()
+
+    def on_character_selected(self, *args):
+        nome = self.personagem_selecionado()
+        tem = nome is not None
+        for w in (self.ch_rename_btn, self.ch_delete_btn, self.ch_add_btn,
+                  self.ch_play_btn, self.ch_remove_file_btn, self.ch_reftext_edit):
+            w.setEnabled(tem)
+
+        self.ch_files_list.clear()
+        if not tem:
+            self.ch_info_lbl.setText("Selecione ou crie um personagem.")
+            self.ch_reftext_edit.clear()
+            return
+
+        personagem = self.library.obter(nome)
+        for arquivo in (personagem.arquivos if personagem else []):
+            caminho = self.library.caminho_absoluto(arquivo)
+            existe = caminho.exists()
+            rotulo = caminho.name if existe else f"{caminho.name}  ⚠️ não encontrado"
+            item = QListWidgetItem(rotulo)
+            item.setData(Qt.ItemDataRole.UserRole, arquivo)
+            item.setToolTip(str(caminho))
+            if not existe:
+                item.setForeground(QColor("#FFB020"))
+            self.ch_files_list.addItem(item)
+
+        if self.ch_files_list.count():
+            self.ch_files_list.setCurrentRow(0)
+        self.ch_info_lbl.setText(f"{nome} — {self.library.resumo(nome)}")
+        self.ch_reftext_edit.setText(personagem.ref_text if personagem else "")
+
+    def on_character_new(self):
+        from PyQt6.QtWidgets import QInputDialog
+        nome, ok = QInputDialog.getText(self, "Novo personagem", "Nome do personagem:")
+        if not ok or not nome.strip():
+            return
+        try:
+            self.library.criar(nome)
+        except ValueError as e:
+            QMessageBox.warning(self, "Não foi possível criar", str(e))
+            return
+        self.refresh_character_list(selecionar=nome.strip())
+        self.status_bar.setText(f"Personagem '{nome.strip()}' criado. Adicione os áudios dele.")
+
+    def on_character_rename(self):
+        nome = self.personagem_selecionado()
+        if not nome:
+            return
+        from PyQt6.QtWidgets import QInputDialog
+        novo, ok = QInputDialog.getText(self, "Renomear personagem", "Novo nome:", text=nome)
+        if not ok or not novo.strip() or novo.strip() == nome:
+            return
+        try:
+            self.library.renomear(nome, novo)
+        except ValueError as e:
+            QMessageBox.warning(self, "Não foi possível renomear", str(e))
+            return
+        self.refresh_character_list(selecionar=novo.strip())
+
+    def on_character_delete(self):
+        nome = self.personagem_selecionado()
+        if not nome:
+            return
+        resposta = QMessageBox.question(
+            self, "Remover personagem",
+            f"Remover '{nome}' da biblioteca?\n\n"
+            f"Os arquivos de áudio continuam no disco — só a associação é apagada."
+        )
+        if resposta != QMessageBox.StandardButton.Yes:
+            return
+        self.library.remover(nome)
+        self.refresh_character_list()
+        self.status_bar.setText(f"Personagem '{nome}' removido.")
+
+    def on_character_add_files(self):
+        nome = self.personagem_selecionado()
+        if not nome:
+            return
+        caminhos, _ = QFileDialog.getOpenFileNames(
+            self, f"Áudios de {nome}", "",
+            "Áudio (*.wav *.mp3 *.flac *.ogg *.m4a);;Todos os arquivos (*)"
+        )
+        if not caminhos:
+            return
+        novos = self.library.adicionar_arquivos(nome, caminhos)
+        self.refresh_character_list(selecionar=nome)
+        ignorados = len(caminhos) - novos
+        recado = f"{novos} áudio(s) adicionados a '{nome}'."
+        if ignorados:
+            recado += f" {ignorados} já estava(m) na lista."
+        self.status_bar.setText(recado)
+
+    def on_character_remove_file(self):
+        nome = self.personagem_selecionado()
+        item = self.ch_files_list.currentItem()
+        if not nome or item is None:
+            return
+        self.library.remover_arquivo(nome, item.data(Qt.ItemDataRole.UserRole))
+        self.refresh_character_list(selecionar=nome)
+
+    def on_character_play_file(self):
+        item = self.ch_files_list.currentItem()
+        if item is None:
+            return
+        caminho = self.library.caminho_absoluto(item.data(Qt.ItemDataRole.UserRole))
+        if caminho.exists():
+            self.play_audio(str(caminho))
+
+    def on_character_reftext_saved(self):
+        nome = self.personagem_selecionado()
+        if nome:
+            self.library.definir_ref_text(nome, self.ch_reftext_edit.text())
 
     def setup_training_tab(self):
         layout = QVBoxLayout(self.tab_training)

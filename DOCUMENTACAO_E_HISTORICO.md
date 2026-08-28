@@ -62,13 +62,21 @@ A aplicação conta com três módulos principais e uma interface gráfica deskt
 
      A correlação de F0 negativa do F5-TTS mostra que a entoação não tem relação com o original — ela é inventada do zero.
 
-4. **🏋️ Modo de Treinamento / Fine-Tuning**:
+4. **👥 Biblioteca de Personagens**:
+   - Relaciona **um ou mais áudios** a um nome de personagem, uma vez só.
+   - Depois o personagem aparece num seletor nas abas de TTS, Áudio ➔ Áudio e Troca de Falante, como alternativa a procurar o arquivo toda vez.
+   - Com **vários áudios**, eles são emendados numa referência única (até 25 s, com um respiro entre eles) — mais material de voz costuma melhorar a clonagem. O resultado fica em cache e é refeito sozinho quando a lista muda.
+   - Guarda também a transcrição opcional da referência, usada pelo motor F5-TTS.
+   - O registro fica em `voices/characters.json`, com caminhos relativos à raiz do projeto para o cadastro sobreviver a mover a pasta.
+   - Também funciona na CLI: `--character "Silvio"` no lugar de `--ref_audio`, e `--list_characters` para ver o que está salvo.
+
+5. **🏋️ Modo de Treinamento / Fine-Tuning**:
    - Permite treinar ou refinar modelos com datasets de áudio locais.
    - Suporte a Média Móvel Exponencial de Pesos (**EMA**) para estabilidade e **Mixed Precision (AMP)** para máxima eficiência na GPU.
 
-5. **🖥️ Interface Gráfica Desktop & Inicializador**:
+6. **🖥️ Interface Gráfica Desktop & Inicializador**:
    - Desenvolvida em **PyQt6** com tema escuro profissional.
-   - Cinco abas: TTS, Áudio ➔ Áudio, **🎭 Troca de Falante**, Treinamento e Status.
+   - Seis abas: TTS, Áudio ➔ Áudio, **🎭 Troca de Falante**, **👥 Personagens**, Treinamento e Status.
    - Na aba de Troca de Falante: botão **🔍 Detectar**, lista com quanto cada um fala (`SPEAKER_00 — 98.8s em 38 trechos (70.2%)`), botão para **ouvir a amostra** de cada um antes de escolher, seletor de encaixe (sincronia × ritmo natural), seed, e o relatório trecho a trecho com as marcas **APERTADO**.
    - Threads assíncronas em segundo plano (`QThread`) para nunca travar a interface durante a síntese.
    - Player de áudio embutido nativo do Windows e botão "Salvar Como...".
@@ -129,6 +137,12 @@ Para trocar a voz de um personagem: aba **🎭 Troca de Falante** ➔ escolha a 
 - **Para Texto ➔ Voz (TTS)**:
   ```bash
   .\venv\Scripts\python.exe inference/infer.py --ref_audio "data/demo_speaker/audio_01.wav" --text "Olá, este é um teste de voz clonada." --output "resultado.wav"
+  ```
+
+- **Usando um personagem salvo em vez do caminho do arquivo**:
+  ```bash
+  .\venv\Scripts\python.exe inference/infer.py --list_characters
+  .\venv\Scripts\python.exe inference/infer.py --character "Silvio" --text "Olá, tudo bem?" --output "saida.wav"
   ```
 
 - **Para Áudio ➔ Áudio (Voice-to-Voice)**:

@@ -11,6 +11,11 @@ from inference.cloner import VoiceCloner
 def main():
     parser = argparse.ArgumentParser(description="CLI de Inferência e Conversão de Voz (Flow Matching)")
     parser.add_argument("--ref_audio", type=str, default="", help="Caminho para a voz alvo/referência a ser clonada")
+    parser.add_argument("--character", type=str, default="",
+                        help="Nome de um personagem da biblioteca (aba 👥 Personagens), em vez de --ref_audio. "
+                             "Com vários áudios, eles são emendados numa referência única.")
+    parser.add_argument("--list_characters", action="store_true",
+                        help="Lista os personagens salvos na biblioteca e sai.")
     parser.add_argument("--ref_text", type=str, default="", help="Transcrição do áudio de referência da voz alvo (opcional)")
     parser.add_argument("--text", type=str, default="", help="Texto para a voz falar (Modo TTS)")
     parser.add_argument("--source_audio", type=str, default="", help="Áudio de origem a ser convertido (Modo Áudio para Áudio / Voice-to-Voice)")
@@ -56,8 +61,37 @@ def main():
     
     args = parser.parse_args()
 
+    if args.list_characters:
+        from inference.voice_library import VoiceLibrary
+        biblioteca = VoiceLibrary()
+        nomes = biblioteca.nomes()
+        if not nomes:
+            print("[CLI] Nenhum personagem salvo ainda. Crie na aba 'Personagens' da GUI.")
+        else:
+            print(f"[CLI] {len(nomes)} personagem(ns) na biblioteca:")
+            for nome in nomes:
+                print(f"  - {nome:24s} {biblioteca.resumo(nome)}")
+        return
+
+    # O personagem resolve para um arquivo de referencia; dai em diante o
+    # pipeline nao sabe que a biblioteca existe.
+    if args.character:
+        from inference.voice_library import VoiceLibrary
+        biblioteca = VoiceLibrary()
+        if biblioteca.obter(args.character) is None:
+            disponiveis = ", ".join(biblioteca.nomes()) or "(nenhum)"
+            parser.error(f"personagem '{args.character}' nao encontrado. Disponiveis: {disponiveis}")
+        try:
+            args.ref_audio = biblioteca.referencia(args.character)
+        except ValueError as e:
+            parser.error(str(e))
+        personagem = biblioteca.obter(args.character)
+        if personagem is not None and personagem.ref_text and not args.ref_text:
+            args.ref_text = personagem.ref_text
+        print(f"[CLI] Personagem '{args.character}': {biblioteca.resumo(args.character)} -> {args.ref_audio}")
+
     if not args.ref_audio and not args.list_speakers:
-        parser.error("--ref_audio e obrigatorio (exceto com --list_speakers)")
+        parser.error("--ref_audio (ou --character) e obrigatorio (exceto com --list_speakers)")
 
     # --list_speakers so diariza; carregar o F5-TTS seria desperdicio.
     cloner = None

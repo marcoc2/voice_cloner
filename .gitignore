@@ -50,3 +50,9 @@ data/
 .DS_Store
 Thumbs.db
 *.log
+
+# --- Biblioteca de personagens ---------------------------------------------
+# Cadastro local: aponta para audios que ficam fora do repositorio, entao um
+# clone receberia um registro com caminhos que nao existem na maquina dele.
+# Cada instalacao monta o seu na aba 'Personagens'.
+voices/
