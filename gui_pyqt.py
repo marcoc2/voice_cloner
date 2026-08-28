@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from inference.cloner import VoiceCloner
 from inference.voice_library import VoiceLibrary
 from gui_waveform import WaveformView, Regiao, cor_do_falante
+from inference import media
 from training.train import Trainer, EMA
 from dataset.audio_dataset import VoiceCloningDataset, voice_cloning_collate_fn
 from torch.utils.data import DataLoader
@@ -516,6 +517,8 @@ class VoiceClonerMainWindow(QMainWindow):
         self.library = VoiceLibrary()
         self.scene_speakers = []     # [{"nome": str, "personagem": str|None}]
         self.last_scene_audio = None
+        self.scene_video_path = None   # MP4 de origem, quando a cena veio de video
+        self.scene_audio_path = None   # audio em que a onda e a conversao trabalham
         # Combos de personagem espalhados pelas abas, para atualizar todos de
         # uma vez quando a biblioteca mudar.
         self._combos_personagem = []
@@ -612,6 +615,35 @@ class VoiceClonerMainWindow(QMainWindow):
             self.gpu_badge.setStyleSheet("color: #00E676; font-size: 12px; padding: 4px 8px; background-color: #202024; border-radius: 4px;")
         else:
             self.gpu_badge.setText("🖥️ Dispositivo: CPU")
+
+    def _aceitar_arquivo_solto(self, campo: QLineEdit, ao_soltar=None):
+        """
+        Deixa um campo de caminho receber arquivo arrastado da janela do Windows.
+
+        O QLineEdit já aceita URLs por padrão, mas cola o texto "file:///C:/..."
+        em vez do caminho. Aqui trocamos o comportamento pelo caminho local.
+        """
+        campo.setAcceptDrops(True)
+
+        def entrar(evento):
+            if evento.mimeData().hasUrls():
+                evento.acceptProposedAction()
+
+        def soltar(evento):
+            for url in evento.mimeData().urls():
+                # O Qt devolve com barras normais (C:/...); normalizar deixa o
+                # campo com a cara do caminho nativo do Windows.
+                caminho = os.path.normpath(url.toLocalFile()) if url.toLocalFile() else ""
+                if caminho:
+                    campo.setText(caminho)
+                    evento.acceptProposedAction()
+                    if ao_soltar is not None:
+                        ao_soltar(caminho)
+                    return
+
+        campo.dragEnterEvent = entrar
+        campo.dragMoveEvent = entrar
+        campo.dropEvent = soltar
 
     def _area_rolavel(self, aba: QWidget, espacamento: int = 10) -> QVBoxLayout:
         """
@@ -714,6 +746,7 @@ class VoiceClonerMainWindow(QMainWindow):
         ref_btn.clicked.connect(lambda: self.select_audio_file(self.ref_path_edit))
         self.play_ref_btn = QPushButton("▶️ Ouvir")
         self.play_ref_btn.clicked.connect(lambda: self.play_audio(self.ref_path_edit.text()))
+        self._aceitar_arquivo_solto(self.ref_path_edit)
         ref_hlayout.addWidget(self.ref_path_edit)
         ref_hlayout.addWidget(ref_btn)
         ref_hlayout.addWidget(self.play_ref_btn)
@@ -811,6 +844,7 @@ class VoiceClonerMainWindow(QMainWindow):
         src_btn.clicked.connect(lambda: self.select_audio_file(self.vc_src_edit))
         self.vc_play_src_btn = QPushButton("▶️ Ouvir Origem")
         self.vc_play_src_btn.clicked.connect(lambda: self.play_audio(self.vc_src_edit.text()))
+        self._aceitar_arquivo_solto(self.vc_src_edit)
         src_layout.addWidget(self.vc_src_edit)
         src_layout.addWidget(src_btn)
         src_layout.addWidget(self.vc_play_src_btn)
@@ -826,6 +860,7 @@ class VoiceClonerMainWindow(QMainWindow):
         tgt_btn.clicked.connect(lambda: self.select_audio_file(self.vc_tgt_edit))
         self.vc_play_tgt_btn = QPushButton("▶️ Ouvir Alvo")
         self.vc_play_tgt_btn.clicked.connect(lambda: self.play_audio(self.vc_tgt_edit.text()))
+        self._aceitar_arquivo_solto(self.vc_tgt_edit)
         tgt_hlayout.addWidget(self.vc_tgt_edit)
         tgt_hlayout.addWidget(tgt_btn)
         tgt_hlayout.addWidget(self.vc_play_tgt_btn)
@@ -933,6 +968,7 @@ class VoiceClonerMainWindow(QMainWindow):
         sw_src_btn.clicked.connect(lambda: self.select_audio_file(self.sw_src_edit))
         sw_play_src_btn = QPushButton("▶️ Ouvir")
         sw_play_src_btn.clicked.connect(lambda: self.play_audio(self.sw_src_edit.text()))
+        self._aceitar_arquivo_solto(self.sw_src_edit)
         src_layout.addWidget(self.sw_src_edit)
         src_layout.addWidget(sw_src_btn)
         src_layout.addWidget(sw_play_src_btn)
@@ -1003,6 +1039,7 @@ class VoiceClonerMainWindow(QMainWindow):
         sw_tgt_btn.clicked.connect(lambda: self.select_audio_file(self.sw_tgt_edit))
         sw_play_tgt_btn = QPushButton("▶️ Ouvir")
         sw_play_tgt_btn.clicked.connect(lambda: self.play_audio(self.sw_tgt_edit.text()))
+        self._aceitar_arquivo_solto(self.sw_tgt_edit)
         tgt_hlayout.addWidget(self.sw_tgt_edit)
         tgt_hlayout.addWidget(sw_tgt_btn)
         tgt_hlayout.addWidget(sw_play_tgt_btn)
@@ -1545,7 +1582,9 @@ class VoiceClonerMainWindow(QMainWindow):
         sc_open_btn = QPushButton("📁 Abrir")
         sc_open_btn.clicked.connect(self.on_scene_open)
         self.sc_play_all_btn = QPushButton("▶️ Ouvir")
-        self.sc_play_all_btn.clicked.connect(lambda: self.play_audio(self.sc_src_edit.text()))
+        self.sc_play_all_btn.clicked.connect(
+            lambda: self.play_audio(self.scene_audio_path or self.sc_src_edit.text()))
+        self._aceitar_arquivo_solto(self.sc_src_edit, self.abrir_cena)
         for w in (self.sc_src_edit, sc_open_btn, self.sc_play_all_btn):
             arq_layout.addWidget(w)
         layout.addWidget(arq_group)
@@ -1590,6 +1629,7 @@ class VoiceClonerMainWindow(QMainWindow):
         self.sc_wave.regioesMudaram.connect(self.on_scene_regions_changed)
         self.sc_wave.selecaoMudou.connect(self.on_scene_region_selected)
         self.sc_wave.pediuTocar.connect(self.on_scene_play_region)
+        self.sc_wave.arquivoSolto.connect(self.abrir_cena)
         onda_layout.addWidget(self.sc_wave)
 
         ferramentas = QHBoxLayout()
@@ -1677,12 +1717,21 @@ class VoiceClonerMainWindow(QMainWindow):
         self.sc_play_res_btn = QPushButton("▶️ Ouvir")
         self.sc_play_res_btn.setEnabled(False)
         self.sc_play_res_btn.clicked.connect(lambda: self.play_audio(self.last_scene_audio))
-        self.sc_save_res_btn = QPushButton("💾 Salvar")
+        self.sc_save_res_btn = QPushButton("💾 Salvar WAV")
         self.sc_save_res_btn.setEnabled(False)
         self.sc_save_res_btn.clicked.connect(lambda: self.save_audio_file(self.last_scene_audio))
+        self.sc_save_mp4_btn = QPushButton("🎞️ Salvar MP4")
+        self.sc_save_mp4_btn.setToolTip(
+            "Grava o vídeo original com a trilha nova.\n"
+            "A imagem é copiada sem recodificar — rápido e sem perda."
+        )
+        self.sc_save_mp4_btn.setEnabled(False)
+        self.sc_save_mp4_btn.setVisible(False)
+        self.sc_save_mp4_btn.clicked.connect(self.on_scene_save_mp4)
         res_layout.addWidget(self.sc_res_label, 1)
         res_layout.addWidget(self.sc_play_res_btn)
         res_layout.addWidget(self.sc_save_res_btn)
+        res_layout.addWidget(self.sc_save_mp4_btn)
         layout.addLayout(res_layout)
 
         self.refresh_scene_speakers()
@@ -1691,24 +1740,71 @@ class VoiceClonerMainWindow(QMainWindow):
 
     def on_scene_open(self):
         caminho, _ = QFileDialog.getOpenFileName(
-            self, "Áudio da cena", "",
-            "Áudio (*.wav *.mp3 *.flac *.ogg *.m4a);;Todos os arquivos (*)"
+            self, "Vídeo ou áudio da cena", "",
+            "Vídeo e áudio (*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.wav *.mp3 *.flac *.ogg *.m4a);;"
+            "Vídeo (*.mp4 *.mkv *.mov *.avi *.webm *.m4v);;"
+            "Áudio (*.wav *.mp3 *.flac *.ogg *.m4a);;"
+            "Todos os arquivos (*)"
         )
-        if not caminho:
+        if caminho:
+            self.abrir_cena(caminho)
+
+    def abrir_cena(self, caminho: str):
+        """
+        Abre vídeo ou áudio. Vindo de vídeo, a trilha é extraída para um WAV
+        temporário: a onda e a conversão trabalham nele, e o vídeo original fica
+        guardado para receber o áudio novo no fim.
+        """
+        if not caminho or not Path(caminho).exists():
+            QMessageBox.warning(self, "Aviso", f"Arquivo não encontrado:\n{caminho}")
             return
-        self.sc_src_edit.setText(caminho)
+
+        eh_video = media.eh_video(caminho)
+        if eh_video and not media.ffmpeg_disponivel():
+            QMessageBox.critical(self, "ffmpeg não encontrado", media.AJUDA_FFMPEG)
+            return
+
+        audio_para_onda = caminho
+        if eh_video:
+            self.status_bar.setText("Extraindo o áudio do vídeo...")
+            QApplication.processEvents()
+            try:
+                audio_para_onda = media.extrair_audio(
+                    caminho, str(BASE_DIR / "_cena_audio.wav")
+                )
+            except RuntimeError as e:
+                self.status_bar.setText("Erro ao extrair o áudio.")
+                QMessageBox.critical(self, "Erro ao abrir o vídeo", str(e))
+                return
+
         try:
-            duracao = self.sc_wave.carregar_audio(caminho)
+            duracao = self.sc_wave.carregar_audio(audio_para_onda)
         except Exception as e:
             QMessageBox.critical(self, "Erro ao abrir", f"Não foi possível ler o áudio:\n{e}")
             return
+
+        self.sc_src_edit.setText(caminho)
+        self.scene_video_path = caminho if eh_video else None
+        self.scene_audio_path = audio_para_onda
+
         if not self.scene_speakers:
             # Uma cena costuma ter pelo menos dois; começa com dois prontos.
             self.scene_speakers = [{"nome": "Falante 1", "personagem": None},
                                    {"nome": "Falante 2", "personagem": None}]
         self.refresh_scene_speakers()
         self.on_scene_regions_changed()
-        self.status_bar.setText(f"Cena carregada: {duracao:.1f}s. Marque os trechos de cada falante.")
+        self._atualizar_botao_mp4()
+
+        tipo = "Vídeo" if eh_video else "Áudio"
+        self.status_bar.setText(
+            f"{tipo} carregado: {duracao:.1f}s. Marque os trechos de cada falante."
+        )
+
+    def _atualizar_botao_mp4(self):
+        """O MP4 de saída só existe quando a cena veio de um vídeo."""
+        veio_de_video = bool(self.scene_video_path)
+        self.sc_save_mp4_btn.setVisible(veio_de_video)
+        self.sc_save_mp4_btn.setEnabled(veio_de_video and bool(self.last_scene_audio))
 
     def refresh_scene_speakers(self):
         linha = self.sc_speaker_list.currentRow()
@@ -1816,7 +1912,7 @@ class VoiceClonerMainWindow(QMainWindow):
             self.on_scene_play_region(r.inicio, r.fim)
 
     def on_scene_play_region(self, inicio: float, fim: float):
-        caminho = self.sc_src_edit.text().strip()
+        caminho = self.scene_audio_path or self.sc_src_edit.text().strip()
         if not caminho or not Path(caminho).exists():
             return
         try:
@@ -1848,6 +1944,7 @@ class VoiceClonerMainWindow(QMainWindow):
             return
         dados = {
             "audio": self.sc_src_edit.text().strip(),
+            "video": self.scene_video_path or "",
             "falantes": self.scene_speakers,
             "trechos": [{"inicio": r.inicio, "fim": r.fim, "falante": r.falante}
                         for r in sorted(self.sc_wave.regioes, key=lambda x: x.inicio)],
@@ -1872,11 +1969,7 @@ class VoiceClonerMainWindow(QMainWindow):
 
         audio = dados.get("audio", "")
         if audio and Path(audio).exists():
-            self.sc_src_edit.setText(audio)
-            try:
-                self.sc_wave.carregar_audio(audio)
-            except Exception as e:
-                QMessageBox.warning(self, "Aviso", f"A marcação abriu, mas o áudio não:\n{e}")
+            self.abrir_cena(audio)
         elif audio:
             QMessageBox.warning(self, "Áudio não encontrado",
                                 f"A marcação aponta para um áudio que não existe:\n{audio}\n\n"
@@ -1894,9 +1987,10 @@ class VoiceClonerMainWindow(QMainWindow):
         self.status_bar.setText(f"Marcação carregada: {len(self.sc_wave.regioes)} trecho(s).")
 
     def on_scene_render(self):
-        origem = self.sc_src_edit.text().strip()
+        # Vindo de video, a conversao roda sobre o WAV extraido, nao sobre o MP4.
+        origem = self.scene_audio_path or self.sc_src_edit.text().strip()
         if not origem or not Path(origem).exists():
-            QMessageBox.warning(self, "Aviso", "Abra o áudio da cena primeiro.")
+            QMessageBox.warning(self, "Aviso", "Abra o vídeo ou áudio da cena primeiro.")
             return
         if not self.sc_wave.regioes:
             QMessageBox.warning(self, "Aviso", "Marque pelo menos um trecho na onda.")
@@ -1963,6 +2057,7 @@ class VoiceClonerMainWindow(QMainWindow):
         self.sc_render_btn.setEnabled(True)
         self.sc_progress_bar.setVisible(False)
         self.last_scene_audio = caminho
+        self._atualizar_botao_mp4()
         convertidos = sum(1 for r in relatorio if r.get("status") == "convertido")
         self.sc_res_label.setText(f"{convertidos} trecho(s) convertidos — {Path(caminho).name}")
         self.sc_res_label.setToolTip(caminho)
@@ -1970,6 +2065,30 @@ class VoiceClonerMainWindow(QMainWindow):
         self.sc_play_res_btn.setEnabled(True)
         self.sc_save_res_btn.setEnabled(True)
         self.status_bar.setText("Cena gerada!")
+
+    def on_scene_save_mp4(self):
+        if not self.scene_video_path or not self.last_scene_audio:
+            return
+        origem = Path(self.scene_video_path)
+        sugestao = str(origem.with_name(f"{origem.stem}_vozes_trocadas.mp4"))
+        destino, _ = QFileDialog.getSaveFileName(self, "Salvar vídeo", sugestao, "MP4 (*.mp4)")
+        if not destino:
+            return
+
+        self.sc_save_mp4_btn.setEnabled(False)
+        self.status_bar.setText("Gravando o MP4 (a imagem é copiada, não recodificada)...")
+        QApplication.processEvents()
+        try:
+            media.juntar_audio_video(self.scene_video_path, self.last_scene_audio, destino)
+        except RuntimeError as e:
+            self.status_bar.setText("Erro ao gravar o MP4.")
+            QMessageBox.critical(self, "Erro ao gravar", str(e))
+            self.sc_save_mp4_btn.setEnabled(True)
+            return
+
+        self.sc_save_mp4_btn.setEnabled(True)
+        self.status_bar.setText(f"Vídeo salvo: {Path(destino).name}")
+        QMessageBox.information(self, "Pronto", f"Vídeo gravado com a trilha nova:\n{destino}")
 
     def on_scene_error(self, mensagem: str):
         self.sc_render_btn.setEnabled(True)

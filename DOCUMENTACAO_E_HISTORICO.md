@@ -75,6 +75,9 @@ A aplicação conta com três módulos principais e uma interface gráfica deskt
    - Quantos falantes quiser — cada um ganha uma cor, e você escolhe um personagem da biblioteca para cada.
    - Arrastar no vazio cria um trecho; arrastar a borda redimensiona; arrastar o meio move; `Delete` apaga; duplo clique toca só aquele trecho. `Ctrl` + roda do mouse dá zoom, roda sozinha rola.
    - **Uma passada por voz**: os trechos de cada personagem são emendados e convertidos juntos, e depois recolados na linha do tempo. O que não foi marcado fica com o áudio original.
+   - **Abre MP4 direto** (também MKV, MOV, AVI, WEBM): a trilha é extraída para um WAV temporário, a onda e a conversão trabalham nele, e o vídeo original fica guardado.
+   - Com vídeo aberto, aparece **🎞️ Salvar MP4**: grava o vídeo com a trilha nova. O fluxo de imagem é **copiado sem recodificar** (`-c:v copy`) — rápido e sem perda. Abrindo só áudio, o botão não aparece.
+   - **Arrastar e soltar**: jogue o arquivo em cima da onda (ela realça) ou em qualquer campo de caminho das outras abas.
    - A marcação salva em `.json`, para retomar o trabalho depois sem remarcar tudo.
    - Existe porque a diarização automática erra a contagem de falantes em material difícil (ver problema **#20**). Aqui você manda.
 
@@ -99,6 +102,7 @@ A aplicação conta com três módulos principais e uma interface gráfica deskt
 - **Matching Paradigm**: Conditional Flow Matching (**CFM**) com amostragem via Ordinary Differential Equation (**ODE**) solvers (Euler / Midpoint).
 - **Language Foundation Model**: `F5-TTS Brazilian Portuguese` (`model_stable.safetensors`), especializado em dicção e fonética brasileira. Carregado com a arquitetura **`F5TTS_Base` (v0)**, que é aquela em que foi treinado — ver problema **#7**.
 - **Audio Decoding / Vocoder**: `Vocos` neural vocoder a 24.000 Hz, eliminando artefatos metálicos e robóticos comuns em modelos anteriores (como RVC ou So-VITS).
+- **Vídeo**: `ffmpeg` (via `inference/media.py`) para extrair a trilha e remontar o MP4. A imagem nunca é recodificada.
 - **Voice Conversion**: `Seed-VC` (`Plachta/Seed-VC` + `BigVGAN v2 44kHz` + `RMVPE` para F0), quadro a quadro e zero-shot. Motor padrão da Troca de Falante — preserva duração e entoação, ao contrário do caminho ASR ➔ TTS.
 - **Speaker Diarization**: `pyannote/speaker-diarization-3.1` (via `pyannote.audio` **3.3.2**) para descobrir quantos falantes existem e rotular cada trecho. Requer aceitar os termos no HuggingFace — ver problema **#11**.
 - **Speech Recognition (ASR)**: `OpenAI Whisper Large v3 Turbo` (com fallback para `Whisper Small`) em modo long-form (`chunk_length_s=30`) para transcrição no modo Áudio ➔ Áudio.
@@ -131,6 +135,7 @@ Abaixo estão detalhados todos os problemas encontrados durante o desenvolviment
 | **19** | **`--num_speakers` parecia nao funcionar na GUI** | As setas so mudam o numero; nada e recalculado ate clicar em **🔍 Detectar** de novo. Nao havia nenhuma indicacao disso na tela. | A aba passa a mostrar o estado: apos detectar informa se a contagem foi automatica ou forcada, e ao mexer nas setas exibe **"⚠️ Contagem alterada — clique em 🔍 Detectar para refazer a analise"**. Verificado que forcar a contagem funciona: com 4, o pyannote divide o SPEAKER_02 em dois. | ✅ Resolvido |
 | **20** | **Diarizacao automatica errando a contagem de falantes** | Numa esquete com Chaves, Quico e Seu Madruga o `pyannote` detectou 2 vozes em vez de 3. Vozes parecidas, muita sobreposicao e fundo musical confundem o modelo — e forcar `num_speakers` nem sempre acerta as fronteiras. O caminho era converter os tres por completo e depois cortar num editor externo. | Nova aba **Editor de Cena**: forma de onda com regioes marcadas a mao, N falantes, um personagem para cada, e a mixagem sai pronta numa passada. Backend em `convert_segments()`, que generaliza `convert_speaker()` para varios falantes com trechos vindos de fora em vez da diarizacao. | ✅ Resolvido |
 | **21** | **Widget de forma de onda sem dependencia nova** | Plotar a onda pediria `pyqtgraph` ou `matplotlib`; o primeiro e mais uma dependencia para um uso so, e o segundo tem interacao ruim para arrastar bordas de regiao. | `gui_waveform.py`: `QWidget` proprio que desenha no `paintEvent`. Um resumo de picos a 200 baldes/segundo e agregado por coluna de pixel com `np.minimum.reduceat`, o que mantem o desenho leve mesmo num arquivo de 20 minutos, e a interacao (criar, mover, redimensionar, zoom) fica sob controle total. | ✅ Resolvido |
+| **22** | **Vaivem para trabalhar com video** | O material de origem e sempre MP4, mas o app so abria audio: era preciso extrair a trilha a mao antes e casar o audio novo com o video depois, num editor. | `inference/media.py` com o ffmpeg (ja instalado na maquina, sem dependencia nova). Abrir MP4 extrai a trilha para um WAV temporario; o botao **Salvar MP4** remonta o video com o audio novo usando `-c:v copy`, que copia o fluxo de imagem sem recodificar. Verificado: `codec_name`, resolucao e `nb_frames` identicos entre entrada e saida, e a trilha do MP4 final bate com a mix (correlacao +1.000) e nao com o original (-0.009). | ✅ Resolvido |
 | **10** | **Referências de demo em `data/demo_speaker/` não contêm fala** | Os quatro `.wav` (todos com exatos 3,50s) são tons sintéticos harmônicos (~150/300/450 Hz) da fase inicial do projeto, e os `.txt` irmãos declaram 90 bytes de texto que o áudio nunca fala. Qualquer teste com eles produz resultado ruim mesmo com o pipeline correto. | Usar referências de fala real (ex.: `dataset/silvio/silvio.mp3`) para avaliar qualidade. Pendente substituir os arquivos de demo. | ⚠️ Conhecido |
 
 ---
@@ -182,7 +187,20 @@ Para trocar a voz de um personagem: aba **🎭 Troca de Falante** ➔ escolha a 
   .\venv\Scripts\python.exe inference/infer.py --source_audio "conversa.wav" --speaker SPEAKER_01 --ref_audio "voz_alvo.wav" --engine f5 --fit_mode pad --output "saida.wav"
   ```
 
-### 3. Pré-requisito da diarização (uma vez por conta)
+### 3. Pré-requisito para trabalhar com vídeo
+
+O **ffmpeg** precisa estar acessível para abrir MP4 e gravar o vídeo de saída. Baixe de
+https://www.gyan.dev/ffmpeg/builds/ e deixe o `ffmpeg.exe` no PATH, ou instale o pacote que
+já traz o binário:
+
+```bash
+pip install imageio-ffmpeg
+```
+
+O app procura o ffmpeg no PATH, nos caminhos usuais do Windows (`C:\Program Files\FFMPEG\bin`) e,
+por último, no `imageio-ffmpeg`. Sem ele, as abas de áudio seguem funcionando normalmente.
+
+### 4. Pré-requisito da diarização (uma vez por conta)
 
 Os pesos do pyannote são *gated*. Aceite os termos nos dois repositórios e faça login:
 

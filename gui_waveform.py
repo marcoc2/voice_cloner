@@ -8,6 +8,7 @@ fronteiras e você prefere marcar você mesmo.
 Não depende de biblioteca de plotagem: o desenho é feito no paintEvent, o que
 mantém o controle fino sobre arrastar bordas, zoom e seleção.
 """
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -65,12 +66,15 @@ class WaveformView(QWidget):
     selecaoMudou = pyqtSignal(int)
     pediuTocar = pyqtSignal(float, float)
     cursorMovido = pyqtSignal(float)
+    arquivoSolto = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumHeight(190)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
+        self._arrasto_ativo = False
 
         self.picos_min = np.zeros(0, dtype=np.float32)
         self.picos_max = np.zeros(0, dtype=np.float32)
@@ -303,6 +307,29 @@ class WaveformView(QWidget):
             r = self.regioes[indice]
             self.pediuTocar.emit(r.inicio, r.fim)
 
+    # --- arrastar e soltar ---------------------------------------------------
+
+    def dragEnterEvent(self, evento):
+        if evento.mimeData().hasUrls():
+            evento.acceptProposedAction()
+            self._arrasto_ativo = True
+            self.update()
+
+    def dragLeaveEvent(self, evento):
+        self._arrasto_ativo = False
+        self.update()
+
+    def dropEvent(self, evento):
+        self._arrasto_ativo = False
+        self.update()
+        for url in evento.mimeData().urls():
+            # Normaliza as barras: o Qt entrega C:/... e o Windows mostra C:\...
+            caminho = os.path.normpath(url.toLocalFile()) if url.toLocalFile() else ""
+            if caminho:
+                self.arquivoSolto.emit(caminho)
+                evento.acceptProposedAction()
+                return
+
     # --- desenho -------------------------------------------------------------
 
     def paintEvent(self, evento):
@@ -315,7 +342,9 @@ class WaveformView(QWidget):
         if self.duracao <= 0 or not len(self.picos_max):
             p.setPen(QColor("#71717A"))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter,
-                       "Carregue um áudio para marcar os trechos de cada falante")
+                       "Arraste um vídeo ou áudio aqui, ou use o botão Abrir")
+            if self._arrasto_ativo:
+                self._moldura_arrasto(p)
             return
 
         area_topo = ALTURA_REGUA
@@ -352,6 +381,16 @@ class WaveformView(QWidget):
         p.drawLine(0, int(meio), largura, int(meio))
 
         self._desenhar_bordas_selecao(p, area_topo, area_altura)
+
+        if self._arrasto_ativo:
+            self._moldura_arrasto(p)
+
+    def _moldura_arrasto(self, p: QPainter):
+        """Realce enquanto um arquivo está sendo arrastado por cima."""
+        p.setPen(QPen(QColor("#00E676"), 3, Qt.PenStyle.DashLine))
+        p.drawRect(self.rect().adjusted(2, 2, -3, -3))
+        p.setPen(QColor("#00E676"))
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Solte para abrir")
 
     def _desenhar_regua(self, p: QPainter, largura: int):
         p.fillRect(QRect(0, 0, largura, ALTURA_REGUA), QColor("#18181B"))

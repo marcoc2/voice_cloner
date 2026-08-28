@@ -56,3 +56,8 @@ Thumbs.db
 # clone receberia um registro com caminhos que nao existem na maquina dele.
 # Cada instalacao monta o seu na aba 'Personagens'.
 voices/
+
+# Temporarios do Editor de Cena (audio extraido do video, preview de trecho)
+_cena_audio.wav
+_trecho_preview.wav
+scene_output.wav
