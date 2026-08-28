@@ -1,0 +1,24 @@
+torch
+torchaudio
+numpy<2.0
+scipy
+soundfile
+librosa
+einops
+tqdm
+pyyaml
+safetensors
+gradio>=4.0.0
+vocos
+PyQt6
+transformers
+f5-tts
+# Diarizacao de falantes (modo Troca de Falante).
+# NAO atualize para a 4.x: ela exige torch>=2.8, troca o torch+cu124 por um
+# build sem CUDA e reintroduz o torchcodec (WinError 127 no Windows).
+pyannote.audio==3.3.2
+
+# Voice conversion quadro a quadro (motor padrao da Troca de Falante).
+# Preserva duracao e inflexao do audio de origem, ao contrario do caminho
+# ASR->TTS do F5. Nao mexe em torch/torchaudio/numpy/torchcodec.
+seed-vc==0.4.3

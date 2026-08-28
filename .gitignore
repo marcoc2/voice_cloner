@@ -1,0 +1,52 @@
+# --- Ambiente virtual (6 GB) ------------------------------------------------
+venv/
+.venv/
+env/
+
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# --- Pesos de modelo (4,3 GB; acima do limite de 100 MB por arquivo do GitHub)
+# Os modelos base sao baixados do HuggingFace na primeira execucao.
+checkpoints/
+*.pt
+*.pth
+*.safetensors
+*.ckpt
+
+# --- Audios de saida gerados pelas execucoes --------------------------------
+*.wav
+speaker_samples/
+swap_output.*
+vc_output*.*
+gui_output.*
+cli_output.*
+demo_output.*
+final_voice.*
+test_speech.*
+pt_br_test.*
+pt_voice_test.*
+v2v_test.*
+
+# --- Material de terceiros --------------------------------------------------
+# A pasta dataset/ guarda trechos de programas de TV e dublagens usados como
+# referencia nos testes locais. Sao gravacoes de terceiros, com direitos de
+# quem produziu, e voz de pessoas identificaveis — nao vao para o repositorio.
+# Se quiser versionar audio proprio, adicione com `git add -f`.
+dataset/*.mp3
+dataset/*.wav
+dataset/*.m4a
+dataset/*.flac
+dataset/**/*.mp3
+dataset/**/*.wav
+dataset/peaks/
+data/
+
+# --- Sistema ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.log

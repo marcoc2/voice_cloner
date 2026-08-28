@@ -1,0 +1,40 @@
+# Configurações do Clonador de Voz Moderno (Flow Matching DiT)
+
+model:
+  dim: 512                # Dimensão oculta do Transformer DiT
+  depth: 8                # Número de camadas DiT Transformer
+  heads: 8                # Número de cabeças de atenção
+  dim_head: 64            # Dimensão por cabeça
+  ff_mult: 4              # Multiplicador do FeedForward
+  mel_dim: 100            # Número de canais Mel (padrão Vocos 24kHz)
+  text_dim: 512           # Dimensão do encoder de texto
+  vocab_size: 256         # Tamanho do vocabulário (ASCII / UTF-8 char level)
+  dropout: 0.1            # Taxa de dropout
+  sigma_min: 0.0001       # Estabilidade numérica no CFM
+
+audio:
+  sample_rate: 24000      # Taxa de amostragem de áudio (24kHz)
+  n_fft: 1024             # Tamanho do FFT
+  hop_length: 256         # Hop length (passo entre frames)
+  win_length: 1024        # Tamanho da janela
+  n_mels: 100             # Número de bandas mel
+  f_min: 0                # Frequência mínima
+  f_max: 12000            # Frequência máxima (Nyquist = sample_rate / 2)
+
+training:
+  batch_size: 8
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  warmup_steps: 1000
+  max_epochs: 100
+  save_every_epochs: 5
+  grad_clip: 1.0
+  ema_decay: 0.999
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+
+inference:
+  n_steps: 32             # Passos de integração ODE (Euler)
+  cfg_strength: 2.0       # Classifier-Free Guidance (aumenta clareza e fidelidade)
+  solver: "euler"         # Solver ODE: 'euler' ou 'midpoint'
+  vocoder: "vocos"        # Tipo de vocoder: 'vocos' ou 'griffin_lim'
