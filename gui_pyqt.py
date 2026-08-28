@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -22,6 +23,7 @@ from PyQt6.QtWidgets import (
 
 from inference.cloner import VoiceCloner
 from inference.voice_library import VoiceLibrary
+from gui_waveform import WaveformView, Regiao, cor_do_falante
 from training.train import Trainer, EMA
 from dataset.audio_dataset import VoiceCloningDataset, voice_cloning_collate_fn
 from torch.utils.data import DataLoader
@@ -386,6 +388,47 @@ class SpeakerSwapWorker(QThread):
             self.error_signal.emit(str(e))
 
 
+class SceneMixWorker(QThread):
+    """Converte todos os falantes marcados e devolve a cena remontada."""
+    progress_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(str, list)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, cloner: VoiceCloner, source_audio: str, assignments: list,
+                 output_path: str, engine: str, f0_condition: bool, diffusion_steps: int):
+        super().__init__()
+        self.cloner = cloner
+        self.source_audio = source_audio
+        self.assignments = assignments
+        self.output_path = output_path
+        self.engine = engine
+        self.f0_condition = f0_condition
+        self.diffusion_steps = diffusion_steps
+
+    def run(self):
+        try:
+            if self.engine == "seedvc":
+                self.progress_signal.emit(
+                    "Carregando o Seed-VC (na primeira vez baixa os modelos)..."
+                )
+
+            def progresso(feitos, total, nome):
+                self.progress_signal.emit(f"Convertendo {nome} — {feitos}/{total} trecho(s)")
+
+            _, _, relatorio = self.cloner.convert_segments(
+                source_audio_path=self.source_audio,
+                assignments=self.assignments,
+                output_path=self.output_path,
+                engine=self.engine,
+                f0_condition=self.f0_condition,
+                diffusion_steps=self.diffusion_steps,
+                progress_cb=progresso,
+            )
+            self.finished_signal.emit(str(self.output_path), relatorio)
+        except Exception as e:
+            self.error_signal.emit(str(e))
+
+
 class TrainingWorker(QThread):
     epoch_signal = pyqtSignal(int, int, float)
     log_signal = pyqtSignal(str)
@@ -471,6 +514,8 @@ class VoiceClonerMainWindow(QMainWindow):
         self.last_swapped_audio = None
         self.speaker_samples = {}
         self.library = VoiceLibrary()
+        self.scene_speakers = []     # [{"nome": str, "personagem": str|None}]
+        self.last_scene_audio = None
         # Combos de personagem espalhados pelas abas, para atualizar todos de
         # uma vez quando a biblioteca mudar.
         self._combos_personagem = []
@@ -505,6 +550,7 @@ class VoiceClonerMainWindow(QMainWindow):
         self.tab_vc = QWidget()
         self.tab_swap = QWidget()
         self.tab_characters = QWidget()
+        self.tab_scene = QWidget()
         self.tab_training = QWidget()
         self.tab_about = QWidget()
 
@@ -512,6 +558,7 @@ class VoiceClonerMainWindow(QMainWindow):
         self.setup_vc_tab()
         self.setup_swap_tab()
         self.setup_characters_tab()
+        self.setup_scene_tab()
         self.setup_training_tab()
         self.setup_about_tab()
 
@@ -519,6 +566,7 @@ class VoiceClonerMainWindow(QMainWindow):
         self.tabs.addTab(self.tab_vc, "🔄 Áudio para Áudio (Voice-to-Voice)")
         self.tabs.addTab(self.tab_swap, "🎭 Troca de Falante (Conversa)")
         self.tabs.addTab(self.tab_characters, "👥 Personagens")
+        self.tabs.addTab(self.tab_scene, "🎬 Editor de Cena")
         self.tabs.addTab(self.tab_training, "🏋️ Treinamento / Fine-Tuning")
         self.tabs.addTab(self.tab_about, "ℹ️ Informações & Status")
         self.tabs.currentChanged.connect(self.on_tab_changed)
@@ -536,6 +584,8 @@ class VoiceClonerMainWindow(QMainWindow):
         """
         if self.tabs.widget(indice) is not self.tab_characters:
             self.refresh_character_combos()
+            if hasattr(self, "sc_char_combo"):
+                self._refresh_scene_char_combo()
 
     def fit_to_screen(self):
         """
@@ -562,6 +612,31 @@ class VoiceClonerMainWindow(QMainWindow):
             self.gpu_badge.setStyleSheet("color: #00E676; font-size: 12px; padding: 4px 8px; background-color: #202024; border-radius: 4px;")
         else:
             self.gpu_badge.setText("🖥️ Dispositivo: CPU")
+
+    def _area_rolavel(self, aba: QWidget, espacamento: int = 10) -> QVBoxLayout:
+        """
+        Põe o conteúdo da aba dentro de uma QScrollArea e devolve o layout onde
+        montar os widgets.
+
+        Sem isto o Qt espreme tudo quando a janela não tem altura suficiente —
+        em vez de cortar — e a aba fica ilegível. As barras aparecem só quando
+        precisam, então em tela grande nada muda.
+        """
+        externo = QVBoxLayout(aba)
+        externo.setContentsMargins(0, 0, 0, 0)
+
+        rolagem = QScrollArea()
+        rolagem.setWidgetResizable(True)
+        rolagem.setFrameShape(QFrame.Shape.NoFrame)
+        externo.addWidget(rolagem)
+
+        conteudo = QWidget()
+        rolagem.setWidget(conteudo)
+
+        interno = QVBoxLayout(conteudo)
+        interno.setContentsMargins(2, 2, 8, 2)
+        interno.setSpacing(espacamento)
+        return interno
 
     def _linha_personagem(self, campo_arquivo: QLineEdit, campo_texto: QLineEdit | None = None) -> QHBoxLayout:
         """
@@ -626,8 +701,7 @@ class VoiceClonerMainWindow(QMainWindow):
                 aviso.setText("")
 
     def setup_inference_tab(self):
-        layout = QVBoxLayout(self.tab_inference)
-        layout.setSpacing(12)
+        layout = self._area_rolavel(self.tab_inference, espacamento=10)
 
         # Grupo 1: Áudio de Referência
         ref_group = QGroupBox("1. Áudio de Referência (Voz a ser clonada - 3 a 10s)")
@@ -726,8 +800,7 @@ class VoiceClonerMainWindow(QMainWindow):
         layout.addWidget(res_group)
 
     def setup_vc_tab(self):
-        layout = QVBoxLayout(self.tab_vc)
-        layout.setSpacing(12)
+        layout = self._area_rolavel(self.tab_vc, espacamento=10)
 
         # Grupo 1: Áudio de Origem (Source Audio)
         src_group = QGroupBox("1. Áudio de Origem (A gravação ou fala que você quer converter)")
@@ -848,24 +921,7 @@ class VoiceClonerMainWindow(QMainWindow):
         self.on_vc_engine_changed()
 
     def setup_swap_tab(self):
-        # Esta aba tem cinco grupos e não cabe na altura útil da janela em telas
-        # menores. Sem a área rolável o Qt espreme todos os widgets em vez de
-        # cortar, o que deixa a aba ilegível.
-        outer = QVBoxLayout(self.tab_swap)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        outer.addWidget(scroll)
-
-        content = QWidget()
-        scroll.setWidget(content)
-
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(2, 2, 8, 2)
-        layout.setSpacing(8)
+        layout = self._area_rolavel(self.tab_swap, espacamento=8)
 
         # Grupo 1: a conversa inteira
         src_group = QGroupBox("1. Conversa (áudio com duas ou mais pessoas)")
@@ -1267,8 +1323,7 @@ class VoiceClonerMainWindow(QMainWindow):
         QMessageBox.critical(self, "Erro na Troca de Falante", f"Ocorreu um erro:\n{err_msg}")
 
     def setup_characters_tab(self):
-        layout = QVBoxLayout(self.tab_characters)
-        layout.setSpacing(10)
+        layout = self._area_rolavel(self.tab_characters, espacamento=10)
 
         explicacao = QLabel(
             "Junte um ou mais áudios sob o nome de um personagem. "
@@ -1478,9 +1533,452 @@ class VoiceClonerMainWindow(QMainWindow):
         if nome:
             self.library.definir_ref_text(nome, self.ch_reftext_edit.text())
 
+    def setup_scene_tab(self):
+        layout = self._area_rolavel(self.tab_scene, espacamento=8)
+
+        # --- linha 1: arquivo
+        arq_group = QGroupBox("1. Áudio da cena")
+        arq_layout = QHBoxLayout(arq_group)
+        self.sc_src_edit = QLineEdit()
+        self.sc_src_edit.setMinimumWidth(140)
+        self.sc_src_edit.setPlaceholderText("Áudio da esquete, com todos os personagens...")
+        sc_open_btn = QPushButton("📁 Abrir")
+        sc_open_btn.clicked.connect(self.on_scene_open)
+        self.sc_play_all_btn = QPushButton("▶️ Ouvir")
+        self.sc_play_all_btn.clicked.connect(lambda: self.play_audio(self.sc_src_edit.text()))
+        for w in (self.sc_src_edit, sc_open_btn, self.sc_play_all_btn):
+            arq_layout.addWidget(w)
+        layout.addWidget(arq_group)
+
+        # --- linha 2: falantes + waveform lado a lado
+        meio = QHBoxLayout()
+
+        falantes_group = QGroupBox("2. Falantes da cena")
+        fal_layout = QVBoxLayout(falantes_group)
+        dica = QLabel("Selecione um falante e arraste sobre a onda para marcar a fala dele.")
+        dica.setWordWrap(True)
+        dica.setStyleSheet("color: #A1A1AA; font-size: 11px; font-weight: normal;")
+        fal_layout.addWidget(dica)
+
+        self.sc_speaker_list = QListWidget()
+        self.sc_speaker_list.setMinimumWidth(170)
+        self.sc_speaker_list.setMaximumWidth(330)
+        self.sc_speaker_list.currentRowChanged.connect(self.on_scene_speaker_selected)
+        fal_layout.addWidget(self.sc_speaker_list)
+
+        bot_fal = QHBoxLayout()
+        btn_add_fal = QPushButton("➕ Falante")
+        btn_add_fal.clicked.connect(self.on_scene_add_speaker)
+        self.sc_del_speaker_btn = QPushButton("🗑️ Remover")
+        self.sc_del_speaker_btn.clicked.connect(self.on_scene_del_speaker)
+        bot_fal.addWidget(btn_add_fal)
+        bot_fal.addWidget(self.sc_del_speaker_btn)
+        fal_layout.addLayout(bot_fal)
+
+        fal_layout.addWidget(QLabel("Voz:"))
+        self.sc_char_combo = QComboBox()
+        self.sc_char_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.sc_char_combo.setMinimumContentsLength(14)
+        self.sc_char_combo.setToolTip("Personagem da biblioteca que vai substituir a voz deste falante")
+        self.sc_char_combo.currentIndexChanged.connect(self.on_scene_char_changed)
+        fal_layout.addWidget(self.sc_char_combo)
+        meio.addWidget(falantes_group, 0)
+
+        onda_group = QGroupBox("3. Marque os trechos de cada falante")
+        onda_layout = QVBoxLayout(onda_group)
+        self.sc_wave = WaveformView()
+        self.sc_wave.regioesMudaram.connect(self.on_scene_regions_changed)
+        self.sc_wave.selecaoMudou.connect(self.on_scene_region_selected)
+        self.sc_wave.pediuTocar.connect(self.on_scene_play_region)
+        onda_layout.addWidget(self.sc_wave)
+
+        ferramentas = QHBoxLayout()
+        for rotulo, dica_txt, acao in [
+            ("🔍+", "Aproximar (ou Ctrl+roda do mouse)", lambda: self.sc_wave.zoom(0.6)),
+            ("🔍−", "Afastar", lambda: self.sc_wave.zoom(1.7)),
+            ("⤢ Tudo", "Ver o arquivo inteiro", self.sc_wave.ver_tudo),
+        ]:
+            b = QPushButton(rotulo)
+            b.setToolTip(dica_txt)
+            b.setMaximumWidth(72)
+            b.clicked.connect(acao)
+            ferramentas.addWidget(b)
+
+        self.sc_play_region_btn = QPushButton("▶️ Trecho")
+        self.sc_play_region_btn.setToolTip("Toca o trecho selecionado (ou dê duplo clique nele)")
+        self.sc_play_region_btn.clicked.connect(self.on_scene_play_selected)
+        ferramentas.addWidget(self.sc_play_region_btn)
+
+        self.sc_del_region_btn = QPushButton("🗑️ Apagar")
+        self.sc_del_region_btn.setToolTip("Apaga o trecho selecionado (tecla Delete)")
+        self.sc_del_region_btn.clicked.connect(self.sc_wave.apagar_selecionada)
+        ferramentas.addWidget(self.sc_del_region_btn)
+
+        btn_limpar = QPushButton("Limpar")
+        btn_limpar.setToolTip("Apaga todos os trechos marcados")
+        btn_limpar.clicked.connect(self.on_scene_clear_regions)
+        ferramentas.addWidget(btn_limpar)
+        ferramentas.addStretch()
+
+        self.sc_marks_lbl = QLabel("Nenhum trecho marcado.")
+        self.sc_marks_lbl.setStyleSheet("color: #A1A1AA; font-size: 11px; font-weight: normal;")
+        self.sc_marks_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.sc_marks_lbl.setMinimumWidth(110)
+        ferramentas.addWidget(self.sc_marks_lbl)
+        onda_layout.addLayout(ferramentas)
+        meio.addWidget(onda_group, 1)
+        layout.addLayout(meio)
+
+        # --- linha 3: marcacao em disco + render
+        acoes_group = QGroupBox("4. Gerar a mixagem")
+        acoes_layout = QHBoxLayout(acoes_group)
+
+        acoes_layout.addWidget(QLabel("Motor:"))
+        self.sc_engine_combo = QComboBox()
+        self.sc_engine_combo.addItem("🎯 Seed-VC — mantém duração e inflexão", "seedvc")
+        self.sc_engine_combo.addItem("💬 F5-TTS — refala o texto", "f5")
+        self.sc_engine_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.sc_engine_combo.setMinimumContentsLength(14)
+        acoes_layout.addWidget(self.sc_engine_combo)
+
+        acoes_layout.addWidget(QLabel("Difusão:"))
+        self.sc_diffusion_spin = QSpinBox()
+        self.sc_diffusion_spin.setRange(4, 100)
+        self.sc_diffusion_spin.setValue(25)
+        acoes_layout.addWidget(self.sc_diffusion_spin)
+
+        btn_salvar_marc = QPushButton("💾 Salvar")
+        btn_salvar_marc.setToolTip("Guarda os trechos marcados num .json para continuar depois")
+        btn_salvar_marc.clicked.connect(self.on_scene_save_marks)
+        acoes_layout.addWidget(btn_salvar_marc)
+
+        btn_abrir_marc = QPushButton("📂 Abrir")
+        btn_abrir_marc.setToolTip("Abre uma marcacao salva")
+        btn_abrir_marc.clicked.connect(self.on_scene_load_marks)
+        acoes_layout.addWidget(btn_abrir_marc)
+        acoes_layout.addStretch()
+        layout.addWidget(acoes_group)
+
+        self.sc_progress_bar = QProgressBar()
+        self.sc_progress_bar.setRange(0, 0)
+        self.sc_progress_bar.setVisible(False)
+        layout.addWidget(self.sc_progress_bar)
+
+        self.sc_render_btn = QPushButton("🎬 Gerar Cena com as Vozes Trocadas")
+        self.sc_render_btn.setObjectName("primaryBtn")
+        self.sc_render_btn.clicked.connect(self.on_scene_render)
+        layout.addWidget(self.sc_render_btn)
+
+        res_layout = QHBoxLayout()
+        self.sc_res_label = QLabel("Nenhuma cena gerada ainda.")
+        self.sc_res_label.setStyleSheet("color: #A1A1AA;")
+        self.sc_res_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.sc_res_label.setMinimumWidth(120)
+        self.sc_play_res_btn = QPushButton("▶️ Ouvir")
+        self.sc_play_res_btn.setEnabled(False)
+        self.sc_play_res_btn.clicked.connect(lambda: self.play_audio(self.last_scene_audio))
+        self.sc_save_res_btn = QPushButton("💾 Salvar")
+        self.sc_save_res_btn.setEnabled(False)
+        self.sc_save_res_btn.clicked.connect(lambda: self.save_audio_file(self.last_scene_audio))
+        res_layout.addWidget(self.sc_res_label, 1)
+        res_layout.addWidget(self.sc_play_res_btn)
+        res_layout.addWidget(self.sc_save_res_btn)
+        layout.addLayout(res_layout)
+
+        self.refresh_scene_speakers()
+
+    # --- Handlers do editor de cena -----------------------------------------
+
+    def on_scene_open(self):
+        caminho, _ = QFileDialog.getOpenFileName(
+            self, "Áudio da cena", "",
+            "Áudio (*.wav *.mp3 *.flac *.ogg *.m4a);;Todos os arquivos (*)"
+        )
+        if not caminho:
+            return
+        self.sc_src_edit.setText(caminho)
+        try:
+            duracao = self.sc_wave.carregar_audio(caminho)
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao abrir", f"Não foi possível ler o áudio:\n{e}")
+            return
+        if not self.scene_speakers:
+            # Uma cena costuma ter pelo menos dois; começa com dois prontos.
+            self.scene_speakers = [{"nome": "Falante 1", "personagem": None},
+                                   {"nome": "Falante 2", "personagem": None}]
+        self.refresh_scene_speakers()
+        self.on_scene_regions_changed()
+        self.status_bar.setText(f"Cena carregada: {duracao:.1f}s. Marque os trechos de cada falante.")
+
+    def refresh_scene_speakers(self):
+        linha = self.sc_speaker_list.currentRow()
+        self.sc_speaker_list.blockSignals(True)
+        self.sc_speaker_list.clear()
+        for i, falante in enumerate(self.scene_speakers):
+            voz = falante["personagem"] or "sem voz escolhida"
+            item = QListWidgetItem(f"  {falante['nome']}  →  {voz}")
+            item.setForeground(cor_do_falante(i))
+            self.sc_speaker_list.addItem(item)
+        self.sc_speaker_list.blockSignals(False)
+
+        if self.scene_speakers:
+            self.sc_speaker_list.setCurrentRow(min(max(0, linha), len(self.scene_speakers) - 1))
+        self.sc_wave.definir_falantes([f["nome"] for f in self.scene_speakers])
+        self._refresh_scene_char_combo()
+        tem = bool(self.scene_speakers)
+        for w in (self.sc_del_speaker_btn, self.sc_char_combo):
+            w.setEnabled(tem)
+
+    def _refresh_scene_char_combo(self):
+        linha = self.sc_speaker_list.currentRow()
+        atual = self.scene_speakers[linha]["personagem"] if 0 <= linha < len(self.scene_speakers) else None
+        self.sc_char_combo.blockSignals(True)
+        self.sc_char_combo.clear()
+        self.sc_char_combo.addItem("— manter a voz original —", None)
+        for nome in self.library.nomes():
+            self.sc_char_combo.addItem(nome, nome)
+        indice = self.sc_char_combo.findData(atual) if atual else 0
+        self.sc_char_combo.setCurrentIndex(indice if indice >= 0 else 0)
+        self.sc_char_combo.blockSignals(False)
+
+    def on_scene_speaker_selected(self, linha: int):
+        if 0 <= linha < len(self.scene_speakers):
+            self.sc_wave.falante_ativo = linha
+            self.sc_wave.update()
+        self._refresh_scene_char_combo()
+
+    def on_scene_add_speaker(self):
+        from PyQt6.QtWidgets import QInputDialog
+        sugestao = f"Falante {len(self.scene_speakers) + 1}"
+        nome, ok = QInputDialog.getText(self, "Novo falante", "Nome do falante na cena:", text=sugestao)
+        if not ok or not nome.strip():
+            return
+        self.scene_speakers.append({"nome": nome.strip(), "personagem": None})
+        self.refresh_scene_speakers()
+        self.sc_speaker_list.setCurrentRow(len(self.scene_speakers) - 1)
+
+    def on_scene_del_speaker(self):
+        linha = self.sc_speaker_list.currentRow()
+        if not (0 <= linha < len(self.scene_speakers)):
+            return
+        marcados = len(self.sc_wave.regioes_do_falante(linha))
+        if marcados:
+            resposta = QMessageBox.question(
+                self, "Remover falante",
+                f"'{self.scene_speakers[linha]['nome']}' tem {marcados} trecho(s) marcados.\n"
+                f"Remover o falante apaga esses trechos. Continuar?"
+            )
+            if resposta != QMessageBox.StandardButton.Yes:
+                return
+        # Apaga as regioes dele e reindexa as dos falantes seguintes.
+        restantes = []
+        for r in self.sc_wave.regioes:
+            if r.falante == linha:
+                continue
+            if r.falante > linha:
+                r.falante -= 1
+            restantes.append(r)
+        del self.scene_speakers[linha]
+        self.sc_wave.regioes = restantes
+        self.sc_wave.selecionada = -1
+        self.refresh_scene_speakers()
+        self.on_scene_regions_changed()
+
+    def on_scene_char_changed(self):
+        linha = self.sc_speaker_list.currentRow()
+        if not (0 <= linha < len(self.scene_speakers)):
+            return
+        self.scene_speakers[linha]["personagem"] = self.sc_char_combo.currentData()
+        self.refresh_scene_speakers()
+
+    def on_scene_regions_changed(self):
+        total = len(self.sc_wave.regioes)
+        if not total:
+            self.sc_marks_lbl.setText("Nenhum trecho marcado.")
+            return
+        partes = []
+        for i, falante in enumerate(self.scene_speakers):
+            regioes = self.sc_wave.regioes_do_falante(i)
+            if regioes:
+                segundos = sum(r.duracao for r in regioes)
+                partes.append(f"{falante['nome']}: {len(regioes)} ({segundos:.1f}s)")
+        self.sc_marks_lbl.setText(f"{total} trecho(s) — " + "  |  ".join(partes))
+
+    def on_scene_region_selected(self, indice: int):
+        tem = indice >= 0
+        self.sc_del_region_btn.setEnabled(tem)
+        self.sc_play_region_btn.setEnabled(tem)
+
+    def on_scene_play_selected(self):
+        indice = self.sc_wave.selecionada
+        if 0 <= indice < len(self.sc_wave.regioes):
+            r = self.sc_wave.regioes[indice]
+            self.on_scene_play_region(r.inicio, r.fim)
+
+    def on_scene_play_region(self, inicio: float, fim: float):
+        caminho = self.sc_src_edit.text().strip()
+        if not caminho or not Path(caminho).exists():
+            return
+        try:
+            import librosa, soundfile as sf_local
+            y, sr = librosa.load(caminho, sr=None, mono=True,
+                                 offset=max(0.0, inicio), duration=max(0.05, fim - inicio))
+            temp = BASE_DIR / "_trecho_preview.wav"
+            sf_local.write(str(temp), y, sr)
+            self.play_audio(str(temp))
+        except Exception as e:
+            self.status_bar.setText(f"Nao foi possivel tocar o trecho: {e}")
+
+    def on_scene_clear_regions(self):
+        if not self.sc_wave.regioes:
+            return
+        resposta = QMessageBox.question(self, "Limpar", "Apagar todos os trechos marcados?")
+        if resposta == QMessageBox.StandardButton.Yes:
+            self.sc_wave.limpar_regioes()
+
+    def _scene_marks_path(self) -> str:
+        origem = self.sc_src_edit.text().strip()
+        base = Path(origem).stem if origem else "cena"
+        return str(BASE_DIR / f"{base}_marcacao.json")
+
+    def on_scene_save_marks(self):
+        caminho, _ = QFileDialog.getSaveFileName(
+            self, "Salvar marcação", self._scene_marks_path(), "JSON (*.json)")
+        if not caminho:
+            return
+        dados = {
+            "audio": self.sc_src_edit.text().strip(),
+            "falantes": self.scene_speakers,
+            "trechos": [{"inicio": r.inicio, "fim": r.fim, "falante": r.falante}
+                        for r in sorted(self.sc_wave.regioes, key=lambda x: x.inicio)],
+        }
+        try:
+            with open(caminho, "w", encoding="utf-8") as f:
+                json.dump(dados, f, ensure_ascii=False, indent=2)
+            self.status_bar.setText(f"Marcação salva em {Path(caminho).name}")
+        except OSError as e:
+            QMessageBox.critical(self, "Erro ao salvar", str(e))
+
+    def on_scene_load_marks(self):
+        caminho, _ = QFileDialog.getOpenFileName(self, "Abrir marcação", "", "JSON (*.json)")
+        if not caminho:
+            return
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                dados = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            QMessageBox.critical(self, "Erro ao abrir", str(e))
+            return
+
+        audio = dados.get("audio", "")
+        if audio and Path(audio).exists():
+            self.sc_src_edit.setText(audio)
+            try:
+                self.sc_wave.carregar_audio(audio)
+            except Exception as e:
+                QMessageBox.warning(self, "Aviso", f"A marcação abriu, mas o áudio não:\n{e}")
+        elif audio:
+            QMessageBox.warning(self, "Áudio não encontrado",
+                                f"A marcação aponta para um áudio que não existe:\n{audio}\n\n"
+                                f"Abra o arquivo manualmente para ver a onda.")
+
+        self.scene_speakers = [{"nome": f.get("nome", f"Falante {i+1}"),
+                                "personagem": f.get("personagem")}
+                               for i, f in enumerate(dados.get("falantes", []))]
+        self.refresh_scene_speakers()
+        self.sc_wave.definir_regioes([
+            Regiao(float(t["inicio"]), float(t["fim"]), int(t["falante"]))
+            for t in dados.get("trechos", [])
+        ])
+        self.on_scene_regions_changed()
+        self.status_bar.setText(f"Marcação carregada: {len(self.sc_wave.regioes)} trecho(s).")
+
+    def on_scene_render(self):
+        origem = self.sc_src_edit.text().strip()
+        if not origem or not Path(origem).exists():
+            QMessageBox.warning(self, "Aviso", "Abra o áudio da cena primeiro.")
+            return
+        if not self.sc_wave.regioes:
+            QMessageBox.warning(self, "Aviso", "Marque pelo menos um trecho na onda.")
+            return
+
+        assignments, sem_voz = [], []
+        for i, falante in enumerate(self.scene_speakers):
+            regioes = self.sc_wave.regioes_do_falante(i)
+            if not regioes:
+                continue
+            personagem = falante["personagem"]
+            if not personagem:
+                sem_voz.append(falante["nome"])
+                continue
+            try:
+                ref = self.library.referencia(personagem)
+            except ValueError as e:
+                QMessageBox.warning(self, "Personagem sem áudio", str(e))
+                return
+            dados_pers = self.library.obter(personagem)
+            assignments.append({
+                "nome": f"{falante['nome']} → {personagem}",
+                "ref_audio": ref,
+                "ref_text": dados_pers.ref_text if dados_pers else "",
+                "segments": [(r.inicio, r.fim) for r in regioes],
+            })
+
+        if not assignments:
+            QMessageBox.warning(self, "Aviso",
+                                "Escolha um personagem para pelo menos um falante que tenha trechos marcados.")
+            return
+        if sem_voz:
+            resposta = QMessageBox.question(
+                self, "Falantes sem voz",
+                "Estes falantes têm trechos marcados mas nenhum personagem escolhido:\n\n"
+                + ", ".join(sem_voz)
+                + "\n\nEles ficam com a voz original. Gerar assim mesmo?"
+            )
+            if resposta != QMessageBox.StandardButton.Yes:
+                return
+
+        self.sc_render_btn.setEnabled(False)
+        self.sc_progress_bar.setVisible(True)
+        self.status_bar.setText("Gerando a cena...")
+
+        if self.cloner is None:
+            self.cloner = VoiceCloner(language="pt-br")
+
+        self.scene_worker = SceneMixWorker(
+            cloner=self.cloner,
+            source_audio=origem,
+            assignments=assignments,
+            output_path=str(BASE_DIR / "scene_output.wav"),
+            engine=self.sc_engine_combo.currentData() or "seedvc",
+            f0_condition=True,
+            diffusion_steps=self.sc_diffusion_spin.value(),
+        )
+        self.scene_worker.progress_signal.connect(lambda m: self.status_bar.setText(m))
+        self.scene_worker.finished_signal.connect(self.on_scene_finished)
+        self.scene_worker.error_signal.connect(self.on_scene_error)
+        self.scene_worker.start()
+
+    def on_scene_finished(self, caminho: str, relatorio: list):
+        self.sc_render_btn.setEnabled(True)
+        self.sc_progress_bar.setVisible(False)
+        self.last_scene_audio = caminho
+        convertidos = sum(1 for r in relatorio if r.get("status") == "convertido")
+        self.sc_res_label.setText(f"{convertidos} trecho(s) convertidos — {Path(caminho).name}")
+        self.sc_res_label.setToolTip(caminho)
+        self.sc_res_label.setStyleSheet("color: #00E676; font-weight: bold;")
+        self.sc_play_res_btn.setEnabled(True)
+        self.sc_save_res_btn.setEnabled(True)
+        self.status_bar.setText("Cena gerada!")
+
+    def on_scene_error(self, mensagem: str):
+        self.sc_render_btn.setEnabled(True)
+        self.sc_progress_bar.setVisible(False)
+        self.status_bar.setText("Erro ao gerar a cena.")
+        QMessageBox.critical(self, "Erro na mixagem", f"Ocorreu um erro:\n{mensagem}")
+
     def setup_training_tab(self):
-        layout = QVBoxLayout(self.tab_training)
-        layout.setSpacing(12)
+        layout = self._area_rolavel(self.tab_training, espacamento=10)
 
         data_group = QGroupBox("Diretório de Treinamento")
         data_layout = QHBoxLayout(data_group)

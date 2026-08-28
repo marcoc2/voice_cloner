@@ -70,13 +70,22 @@ A aplicação conta com três módulos principais e uma interface gráfica deskt
    - O registro fica em `voices/characters.json`, com caminhos relativos à raiz do projeto para o cadastro sobreviver a mover a pasta.
    - Também funciona na CLI: `--character "Silvio"` no lugar de `--ref_audio`, e `--list_characters` para ver o que está salvo.
 
-5. **🏋️ Modo de Treinamento / Fine-Tuning**:
+5. **🎬 Editor de Cena (marcação manual, N falantes)**:
+   - Abre o áudio e desenha a **forma de onda**; você arrasta sobre ela para marcar quem fala em cada trecho.
+   - Quantos falantes quiser — cada um ganha uma cor, e você escolhe um personagem da biblioteca para cada.
+   - Arrastar no vazio cria um trecho; arrastar a borda redimensiona; arrastar o meio move; `Delete` apaga; duplo clique toca só aquele trecho. `Ctrl` + roda do mouse dá zoom, roda sozinha rola.
+   - **Uma passada por voz**: os trechos de cada personagem são emendados e convertidos juntos, e depois recolados na linha do tempo. O que não foi marcado fica com o áudio original.
+   - A marcação salva em `.json`, para retomar o trabalho depois sem remarcar tudo.
+   - Existe porque a diarização automática erra a contagem de falantes em material difícil (ver problema **#20**). Aqui você manda.
+
+6. **🏋️ Modo de Treinamento / Fine-Tuning**:
    - Permite treinar ou refinar modelos com datasets de áudio locais.
    - Suporte a Média Móvel Exponencial de Pesos (**EMA**) para estabilidade e **Mixed Precision (AMP)** para máxima eficiência na GPU.
 
-6. **🖥️ Interface Gráfica Desktop & Inicializador**:
+7. **🖥️ Interface Gráfica Desktop & Inicializador**:
    - Desenvolvida em **PyQt6** com tema escuro profissional.
-   - Seis abas: TTS, Áudio ➔ Áudio, **🎭 Troca de Falante**, **👥 Personagens**, Treinamento e Status.
+   - Sete abas: TTS, Áudio ➔ Áudio, **🎭 Troca de Falante**, **👥 Personagens**, **🎬 Editor de Cena**, Treinamento e Status.
+   - Todas as abas de conteúdo ficam dentro de uma área rolável: em tela pequena elas rolam em vez de espremer os widgets.
    - Na aba de Troca de Falante: botão **🔍 Detectar**, lista com quanto cada um fala (`SPEAKER_00 — 98.8s em 38 trechos (70.2%)`), botão para **ouvir a amostra** de cada um antes de escolher, seletor de encaixe (sincronia × ritmo natural), seed, e o relatório trecho a trecho com as marcas **APERTADO**.
    - Threads assíncronas em segundo plano (`QThread`) para nunca travar a interface durante a síntese.
    - Player de áudio embutido nativo do Windows e botão "Salvar Como...".
@@ -120,6 +129,8 @@ Abaixo estão detalhados todos os problemas encontrados durante o desenvolviment
 | **17** | **Audio convertido menor, sem lip sync e com fonemas faltando** | O pipeline era `Whisper -> F5-TTS`: audio vira TEXTO e depois audio de novo. Tudo que nao e texto (duracao, curva de pitch, enfase, pausas) e descartado no caminho e reinventado pelo TTS. Palavra que o ASR nao ouviu simplesmente nao existe na saida. Medido: erro de duracao 5,0% e correlacao de F0 com a fonte **-0,154** (nenhuma relacao). Nenhum ajuste de `fit_mode`, seed ou passos ODE resolve — e limitacao de arquitetura. | Integracao do **Seed-VC** como motor padrao (`--engine seedvc`): voice conversion quadro a quadro, zero-shot, sem texto no meio. Medido: erro de duracao **0,1%**, correlacao de F0 **0,782**, similaridade com a voz alvo 0,797 (contra 0,740 do F5). O caminho F5 continua disponivel para quando o objetivo e mudar o que e dito. | ✅ Resolvido |
 | **18** | **`BigVGAN._from_pretrained() missing 2 required keyword-only arguments`** | O BigVGAN embutido no seed-vc declara `proxies` e `resume_download` como obrigatorios, mas o `huggingface_hub` 1.x parou de passa-los — e ainda os repassa ao proprio `hf_hub_download`, que tambem nao os aceita mais. Mesma raiz do problema **#12**, em outra biblioteca. | Os remendos foram centralizados em `inference/hf_compat.py` (`patch_hf_hub_download`, `patch_bigvgan`, `patch_torch_load`), usado pelo diarizer e pelo motor de VC. Traduz a API antiga em vez de mudar versao de pacote. | ✅ Resolvido |
 | **19** | **`--num_speakers` parecia nao funcionar na GUI** | As setas so mudam o numero; nada e recalculado ate clicar em **🔍 Detectar** de novo. Nao havia nenhuma indicacao disso na tela. | A aba passa a mostrar o estado: apos detectar informa se a contagem foi automatica ou forcada, e ao mexer nas setas exibe **"⚠️ Contagem alterada — clique em 🔍 Detectar para refazer a analise"**. Verificado que forcar a contagem funciona: com 4, o pyannote divide o SPEAKER_02 em dois. | ✅ Resolvido |
+| **20** | **Diarizacao automatica errando a contagem de falantes** | Numa esquete com Chaves, Quico e Seu Madruga o `pyannote` detectou 2 vozes em vez de 3. Vozes parecidas, muita sobreposicao e fundo musical confundem o modelo — e forcar `num_speakers` nem sempre acerta as fronteiras. O caminho era converter os tres por completo e depois cortar num editor externo. | Nova aba **Editor de Cena**: forma de onda com regioes marcadas a mao, N falantes, um personagem para cada, e a mixagem sai pronta numa passada. Backend em `convert_segments()`, que generaliza `convert_speaker()` para varios falantes com trechos vindos de fora em vez da diarizacao. | ✅ Resolvido |
+| **21** | **Widget de forma de onda sem dependencia nova** | Plotar a onda pediria `pyqtgraph` ou `matplotlib`; o primeiro e mais uma dependencia para um uso so, e o segundo tem interacao ruim para arrastar bordas de regiao. | `gui_waveform.py`: `QWidget` proprio que desenha no `paintEvent`. Um resumo de picos a 200 baldes/segundo e agregado por coluna de pixel com `np.minimum.reduceat`, o que mantem o desenho leve mesmo num arquivo de 20 minutos, e a interacao (criar, mover, redimensionar, zoom) fica sob controle total. | ✅ Resolvido |
 | **10** | **Referências de demo em `data/demo_speaker/` não contêm fala** | Os quatro `.wav` (todos com exatos 3,50s) são tons sintéticos harmônicos (~150/300/450 Hz) da fase inicial do projeto, e os `.txt` irmãos declaram 90 bytes de texto que o áudio nunca fala. Qualquer teste com eles produz resultado ruim mesmo com o pipeline correto. | Usar referências de fala real (ex.: `dataset/silvio/silvio.mp3`) para avaliar qualidade. Pendente substituir os arquivos de demo. | ⚠️ Conhecido |
 
 ---

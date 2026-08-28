@@ -436,6 +436,242 @@ class VoiceCloner:
             return np.pad(wav, (0, slot_samples - len(wav)))
         return wav[:slot_samples]
 
+    def convert_segments(
+        self,
+        source_audio_path: str | Path,
+        assignments: list[dict],
+        output_path: str | Path | None = None,
+        engine: str = "seedvc",
+        f0_condition: bool = True,
+        diffusion_steps: int = 25,
+        speed: float = 1.0,
+        n_steps: int = 32,
+        cfg_strength: float = 2.0,
+        seed: int | None = None,
+        crossfade: float = 0.015,
+        progress_cb=None
+    ) -> tuple[np.ndarray, int, list[dict]]:
+        """
+        MODO 4: converte trechos marcados à mão, de vários falantes, numa mixagem.
+
+        Diferente de `convert_speaker`, aqui não há diarização: os trechos vêm
+        prontos, marcados na forma de onda. Serve para quando a detecção
+        automática erra a contagem de falantes ou as fronteiras, e para o caso
+        comum de trocar duas ou três vozes de uma vez numa esquete.
+
+        assignments: uma entrada por falante —
+            {"nome": "Chaves", "ref_audio": "voices/_cache/chaves.wav",
+             "segments": [(inicio, fim), ...]}
+        Trechos sem falante atribuído simplesmente não entram na lista e o áudio
+        original é preservado ali.
+
+        Cada voz é convertida numa passada só (os trechos dela emendados), pelo
+        mesmo motivo de `convert_speaker`: o Seed-VC reprocessa a referência a
+        cada chamada, e estatísticas de F0 calculadas sobre a voz certa saem
+        melhores do que sobre a conversa inteira.
+        """
+        source_p = Path(source_audio_path)
+        if not source_p.exists():
+            raise FileNotFoundError(f"Áudio de origem '{source_audio_path}' não encontrado.")
+
+        engine = (engine or "seedvc").lower()
+        if engine not in ("f5", "seedvc"):
+            raise ValueError(f"engine deve ser 'f5' ou 'seedvc', recebido '{engine}'.")
+        if engine == "f5" and self.f5_engine is None:
+            raise RuntimeError("O motor F5-TTS nao esta disponivel neste ambiente.")
+
+        # Só entram falantes com referência e pelo menos um trecho.
+        tarefas = []
+        for atribuicao in assignments:
+            ref = atribuicao.get("ref_audio")
+            trechos = [t for t in atribuicao.get("segments", []) if t[1] > t[0]]
+            if not ref or not Path(ref).exists() or not trechos:
+                continue
+            tarefas.append({
+                "nome": atribuicao.get("nome", "?"),
+                "ref_audio": str(ref),
+                "ref_text": atribuicao.get("ref_text", ""),
+                "segments": sorted(trechos, key=lambda t: t[0]),
+            })
+        if not tarefas:
+            raise ValueError("Nenhum falante com voz escolhida e trecho marcado.")
+
+        vc_engine = self._get_vc_engine(f0_condition) if engine == "seedvc" else None
+        sr = 24000 if engine == "f5" else vc_engine.sample_rate
+
+        audio, orig_sr = sf.read(str(source_p), always_2d=False)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=-1)
+        audio = np.ascontiguousarray(audio, dtype=np.float32)
+        if orig_sr != sr:
+            import librosa
+            audio = librosa.resample(audio, orig_sr=orig_sr, target_sr=sr)
+
+        # Achata tudo numa linha do tempo única e corta sobreposição: dois
+        # falantes ocupando o mesmo instante nao teria como ser remontado.
+        eventos = []
+        for indice_tarefa, tarefa in enumerate(tarefas):
+            for inicio, fim in tarefa["segments"]:
+                eventos.append([float(inicio), float(fim), indice_tarefa])
+        eventos.sort(key=lambda e: e[0])
+
+        sobrepostos = 0
+        limpos = []
+        for evento in eventos:
+            if limpos and evento[0] < limpos[-1][1]:
+                sobrepostos += 1
+                evento[0] = limpos[-1][1]
+                if evento[0] >= evento[1]:
+                    continue
+            limpos.append(evento)
+        if sobrepostos:
+            print(f"[VoiceCloner] Aviso: {sobrepostos} trecho(s) se sobrepunham; "
+                  f"o comeco foi encurtado para caber na linha do tempo.")
+
+        total_trechos = len(limpos)
+        print(f"[VoiceCloner] Mixagem: {len(tarefas)} voz(es), {total_trechos} trecho(s) marcados, "
+              f"motor {'Seed-VC' if engine == 'seedvc' else 'F5-TTS'}.")
+
+        # --- converte, uma passada por voz ---------------------------------
+        convertidos: dict[int, np.ndarray] = {}   # indice em `limpos` -> audio
+        silencio = np.zeros(int(0.25 * sr), dtype=np.float32)
+        feitos = 0
+
+        for indice_tarefa, tarefa in enumerate(tarefas):
+            meus = [(i, e) for i, e in enumerate(limpos) if e[2] == indice_tarefa]
+            if not meus:
+                continue
+
+            if engine == "seedvc":
+                pedacos, offsets, pos = [], [], 0
+                for i, (inicio, fim, _) in meus:
+                    a, b = max(0, int(inicio * sr)), min(len(audio), int(fim * sr))
+                    if b <= a:
+                        continue
+                    pedacos.append(audio[a:b])
+                    offsets.append((i, pos, pos + (b - a)))
+                    pos += (b - a) + len(silencio)
+                    pedacos.append(silencio)
+                if not pedacos:
+                    continue
+
+                emendado = np.concatenate(pedacos[:-1])
+                print(f"[VoiceCloner]   {tarefa['nome']}: {len(offsets)} trecho(s), "
+                      f"{len(emendado)/sr:.1f}s -> convertendo...")
+                saida, vc_sr = vc_engine.convert_array(
+                    emendado, sr, tarefa["ref_audio"], diffusion_steps=diffusion_steps
+                )
+                if vc_sr != sr:
+                    import librosa
+                    saida = librosa.resample(saida, orig_sr=vc_sr, target_sr=sr)
+                if len(saida) < len(emendado):
+                    saida = np.pad(saida, (0, len(emendado) - len(saida)))
+                saida = saida[:len(emendado)]
+
+                for i, ini, fim in offsets:
+                    convertidos[i] = np.ascontiguousarray(saida[ini:fim], dtype=np.float32)
+                feitos += len(offsets)
+                if progress_cb is not None:
+                    progress_cb(feitos, total_trechos, tarefa["nome"])
+            else:
+                ref_file, ref_text = self._prepare_reference(tarefa["ref_audio"], tarefa["ref_text"])
+                try:
+                    ref_segundos = float(sf.info(ref_file).duration)
+                except Exception:
+                    ref_segundos = 0.0
+
+                for i, (inicio, fim, _) in meus:
+                    a, b = max(0, int(inicio * sr)), min(len(audio), int(fim * sr))
+                    if b <= a:
+                        continue
+                    trecho = audio[a:b]
+                    texto = self.transcribe_array(trecho, sr, verbose=False).strip()
+                    feitos += 1
+                    if not texto:
+                        if progress_cb is not None:
+                            progress_cb(feitos, total_trechos, tarefa["nome"])
+                        continue
+                    wav_out, gen_sr, _ = self.f5_engine.infer(
+                        ref_file=ref_file, ref_text=ref_text, gen_text=texto,
+                        speed=float(speed), nfe_step=int(n_steps),
+                        cfg_strength=float(cfg_strength),
+                        fix_duration=(ref_segundos + (b - a) / sr) if ref_segundos else None,
+                        seed=seed, show_info=lambda *x, **k: None
+                    )
+                    wav_out = np.ascontiguousarray(wav_out, dtype=np.float32)
+                    if gen_sr != sr:
+                        import librosa
+                        wav_out = librosa.resample(wav_out, orig_sr=gen_sr, target_sr=sr)
+                    convertidos[i] = wav_out
+                    if progress_cb is not None:
+                        progress_cb(feitos, total_trechos, tarefa["nome"])
+
+        # --- remonta a linha do tempo --------------------------------------
+        fade = max(0, int(crossfade * sr))
+        pecas: list[np.ndarray] = []
+        relatorio: list[dict] = []
+        cursor = 0
+
+        for i, (inicio, fim, indice_tarefa) in enumerate(limpos):
+            a, b = max(0, int(inicio * sr)), min(len(audio), int(fim * sr))
+            if b <= a:
+                continue
+            if a > cursor:
+                pecas.append(audio[cursor:a].copy())
+
+            trecho = audio[a:b]
+            gerado = convertidos.get(i)
+            nome = tarefas[indice_tarefa]["nome"]
+
+            if gerado is None or not len(gerado):
+                pecas.append(trecho.copy())
+                relatorio.append({"inicio": inicio, "fim": fim, "falante": nome,
+                                  "status": "mantido"})
+                cursor = b
+                continue
+
+            usa_fade = bool(fade and pecas and len(pecas[-1]) >= fade)
+            alvo = len(trecho) + (fade if usa_fade else 0)
+            ajustado = self._fit_to_slot(np.ascontiguousarray(gerado, dtype=np.float32), alvo, "pad")
+
+            rms_orig = float(np.sqrt(np.mean(trecho ** 2)))
+            rms_novo = float(np.sqrt(np.mean(ajustado ** 2)))
+            if rms_novo > 1e-6 and rms_orig > 1e-6:
+                ajustado = ajustado * (rms_orig / rms_novo)
+                pico = float(np.abs(ajustado).max())
+                if pico > 0.99:
+                    ajustado = ajustado * (0.99 / pico)
+
+            if usa_fade and len(ajustado) > fade:
+                rampa = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+                cauda = pecas[-1][-fade:] * (1.0 - rampa) + ajustado[:fade] * rampa
+                pecas[-1] = np.concatenate([pecas[-1][:-fade], cauda])
+                ajustado = ajustado[fade:]
+            if fade and len(ajustado) > fade:
+                ajustado = ajustado.copy()
+                ajustado[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
+
+            pecas.append(ajustado)
+            relatorio.append({"inicio": inicio, "fim": fim, "falante": nome,
+                              "segundos": (b - a) / sr, "status": "convertido"})
+            cursor = b
+
+        if cursor < len(audio):
+            pecas.append(audio[cursor:].copy())
+
+        resultado = np.concatenate(pecas) if pecas else audio
+        pico = float(np.abs(resultado).max())
+        if pico > 0.99:
+            resultado = resultado * (0.99 / pico)
+
+        if output_path:
+            sf.write(str(output_path), resultado, sr)
+            print(f"[VoiceCloner] Mixagem salva em: {output_path}")
+
+        convertidos_n = sum(1 for r in relatorio if r["status"] == "convertido")
+        print(f"[VoiceCloner] Concluido: {convertidos_n}/{len(relatorio)} trecho(s) convertidos.")
+        return resultado, sr, relatorio
+
     def convert_speaker(
         self,
         source_audio_path: str | Path,
