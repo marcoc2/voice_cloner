@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QLabel, QPushButton, QLineEdit, QTextEdit,
     QFileDialog, QSlider, QSpinBox, QDoubleSpinBox, QComboBox,
     QProgressBar, QGroupBox, QGridLayout, QMessageBox, QFrame, QSplitter,
-    QListWidget, QListWidgetItem, QScrollArea, QSizePolicy
+    QListWidget, QListWidgetItem, QScrollArea, QSizePolicy, QCheckBox
 )
 
 from inference.cloner import VoiceCloner
@@ -338,7 +338,8 @@ class SpeakerSwapWorker(QThread):
                  speaker: str, target_ref_text: str, output_path: str,
                  num_speakers: int | None, min_speakers: int | None, max_speakers: int | None,
                  n_steps: int, fit_mode: str, seed: int | None,
-                 engine: str = "seedvc", f0_condition: bool = True, diffusion_steps: int = 25):
+                 engine: str = "seedvc", f0_condition: bool = True, diffusion_steps: int = 25,
+                 separar_voz: bool = False):
         super().__init__()
         self.cloner = cloner
         self.source_audio = source_audio
@@ -355,9 +356,12 @@ class SpeakerSwapWorker(QThread):
         self.engine = engine
         self.f0_condition = f0_condition
         self.diffusion_steps = diffusion_steps
+        self.separar_voz = separar_voz
 
     def run(self):
         try:
+            if self.separar_voz:
+                self.progress_signal.emit("Separando a voz do fundo com o Demucs...")
             if self.engine == "seedvc":
                 self.progress_signal.emit(
                     "Carregando o Seed-VC (na primeira vez baixa os modelos, pode levar alguns minutos)..."
@@ -382,7 +386,8 @@ class SpeakerSwapWorker(QThread):
                 seed=self.seed,
                 engine=self.engine,
                 f0_condition=self.f0_condition,
-                diffusion_steps=self.diffusion_steps
+                diffusion_steps=self.diffusion_steps,
+                separar_voz=self.separar_voz
             )
             self.finished_signal.emit(str(self.output_path), report)
         except Exception as e:
@@ -396,7 +401,8 @@ class SceneMixWorker(QThread):
     error_signal = pyqtSignal(str)
 
     def __init__(self, cloner: VoiceCloner, source_audio: str, assignments: list,
-                 output_path: str, engine: str, f0_condition: bool, diffusion_steps: int):
+                 output_path: str, engine: str, f0_condition: bool, diffusion_steps: int,
+                 separar_voz: bool = False):
         super().__init__()
         self.cloner = cloner
         self.source_audio = source_audio
@@ -405,10 +411,13 @@ class SceneMixWorker(QThread):
         self.engine = engine
         self.f0_condition = f0_condition
         self.diffusion_steps = diffusion_steps
+        self.separar_voz = separar_voz
 
     def run(self):
         try:
-            if self.engine == "seedvc":
+            if self.separar_voz:
+                self.progress_signal.emit("Separando a voz do fundo com o Demucs...")
+            elif self.engine == "seedvc":
                 self.progress_signal.emit(
                     "Carregando o Seed-VC (na primeira vez baixa os modelos)..."
                 )
@@ -423,6 +432,7 @@ class SceneMixWorker(QThread):
                 engine=self.engine,
                 f0_condition=self.f0_condition,
                 diffusion_steps=self.diffusion_steps,
+                separar_voz=self.separar_voz,
                 progress_cb=progresso,
             )
             self.finished_signal.emit(str(self.output_path), relatorio)
@@ -644,6 +654,25 @@ class VoiceClonerMainWindow(QMainWindow):
         campo.dragEnterEvent = entrar
         campo.dragMoveEvent = entrar
         campo.dropEvent = soltar
+
+    def _caixa_separar_voz(self) -> QCheckBox:
+        """
+        Caixa para tirar música e ruído antes de converter.
+
+        Desligada por padrão: separar custa tempo e não faz falta em gravação
+        limpa. Quando há fundo, faz diferença grande — medido neste projeto, com
+        música a 6 dB abaixo da fala, sem separar o modelo converte a música
+        junto e ela vira som de voz (correlação da música com o original: -0,003);
+        separando, ela volta praticamente intacta (+0,832).
+        """
+        caixa = QCheckBox("Separar voz do fundo antes de converter")
+        caixa.setToolTip(
+            "Usa o Demucs para tirar música e ruído, converte só a voz e devolve o fundo por cima.\n"
+            "Ligue quando houver trilha sonora sob a fala. Em gravação limpa não muda nada\n"
+            "e só custa tempo (~5x tempo real na GPU)."
+        )
+        caixa.setStyleSheet("font-weight: normal;")
+        return caixa
 
     def _area_rolavel(self, aba: QWidget, espacamento: int = 10) -> QVBoxLayout:
         """
@@ -1121,6 +1150,9 @@ class VoiceClonerMainWindow(QMainWindow):
             "fixe a seed quando quiser repetir um resultado bom."
         )
         par_grid.addWidget(self.sw_seed_spin, 2, 3)
+
+        self.sw_separar_check = self._caixa_separar_voz()
+        par_grid.addWidget(self.sw_separar_check, 3, 0, 1, 4)
         layout.addWidget(par_group)
         self.on_engine_changed()
 
@@ -1301,7 +1333,8 @@ class VoiceClonerMainWindow(QMainWindow):
             seed=self.sw_seed_spin.value() or None,
             engine=engine,
             f0_condition=True,
-            diffusion_steps=self.sw_diffusion_spin.value()
+            diffusion_steps=self.sw_diffusion_spin.value(),
+            separar_voz=self.sw_separar_check.isChecked()
         )
         self.swap_worker.progress_signal.connect(lambda msg: self.status_bar.setText(msg))
         self.swap_worker.finished_signal.connect(self.on_swap_finished)
@@ -1687,6 +1720,9 @@ class VoiceClonerMainWindow(QMainWindow):
         self.sc_diffusion_spin.setValue(25)
         acoes_layout.addWidget(self.sc_diffusion_spin)
 
+        self.sc_separar_check = self._caixa_separar_voz()
+        acoes_layout.addWidget(self.sc_separar_check)
+
         btn_salvar_marc = QPushButton("💾 Salvar")
         btn_salvar_marc.setToolTip("Guarda os trechos marcados num .json para continuar depois")
         btn_salvar_marc.clicked.connect(self.on_scene_save_marks)
@@ -2047,6 +2083,7 @@ class VoiceClonerMainWindow(QMainWindow):
             engine=self.sc_engine_combo.currentData() or "seedvc",
             f0_condition=True,
             diffusion_steps=self.sc_diffusion_spin.value(),
+            separar_voz=self.sc_separar_check.isChecked(),
         )
         self.scene_worker.progress_signal.connect(lambda m: self.status_bar.setText(m))
         self.scene_worker.finished_signal.connect(self.on_scene_finished)

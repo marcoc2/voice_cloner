@@ -22,3 +22,7 @@ pyannote.audio==3.3.2
 # Preserva duracao e inflexao do audio de origem, ao contrario do caminho
 # ASR->TTS do F5. Nao mexe em torch/torchaudio/numpy/torchcodec.
 seed-vc==0.4.3
+
+# Separacao de voz e fundo (caixa opcional 'Separar voz do fundo').
+# So 3 pacotes; nao mexe em torch, torchaudio nem numpy.
+demucs==4.1.0

@@ -76,6 +76,7 @@ class VoiceCloner:
         self.asr_pipeline = None
         self._diarizer = None
         self._vc_engine = None
+        self._separator = None
 
         print(f"[VoiceCloner] Inicializando motor de clonagem (Idioma: {self.language.upper()}) no dispositivo: {self.device}")
 
@@ -370,6 +371,42 @@ class VoiceCloner:
 
         return waveform, self.sample_rate
 
+    def _get_separator(self):
+        """Carrega o separador de voz sob demanda."""
+        if self._separator is None:
+            from inference.separator import VocalSeparator
+            self._separator = VocalSeparator(device=self.device_str)
+        return self._separator
+
+    def _separar_voz(self, audio: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray | None]:
+        """
+        Tira a música e o ruído de fundo do caminho da conversão.
+
+        Devolve (voz, fundo). A conversão trabalha só na voz; o fundo volta
+        somado no fim, sem nunca ter passado por nenhum modelo. Se o áudio já
+        for limpo, o fundo é praticamente silêncio e a soma não muda nada.
+        """
+        separador = self._get_separator()
+        print(f"[VoiceCloner] Separando voz do fundo ({len(audio)/sr:.1f}s)...")
+        voz, fundo = separador.separar(audio, sr)
+        proporcao = separador.proporcao_de_fundo(voz, fundo)
+        print(f"[VoiceCloner] Fundo detectado: {proporcao*100:.1f}% da energia. "
+              f"A conversao vai trabalhar so na voz.")
+        return voz, fundo
+
+    @staticmethod
+    def _somar_fundo(resultado: np.ndarray, fundo: np.ndarray | None) -> np.ndarray:
+        """Devolve o fundo original por cima do resultado, alinhando o comprimento."""
+        if fundo is None:
+            return resultado
+        n = min(len(resultado), len(fundo))
+        saida = resultado.copy()
+        saida[:n] = saida[:n] + fundo[:n]
+        pico = float(np.abs(saida).max())
+        if pico > 0.99:
+            saida = saida * (0.99 / pico)
+        return saida
+
     def _get_vc_engine(self, f0_condition: bool = True):
         """Carrega o Seed-VC sob demanda (leva ~2 min na primeira vez)."""
         if self._vc_engine is None or self._vc_engine.f0_condition != f0_condition:
@@ -449,7 +486,8 @@ class VoiceCloner:
         cfg_strength: float = 2.0,
         seed: int | None = None,
         crossfade: float = 0.015,
-        progress_cb=None
+        progress_cb=None,
+        separar_voz: bool = False
     ) -> tuple[np.ndarray, int, list[dict]]:
         """
         MODO 4: converte trechos marcados à mão, de vários falantes, numa mixagem.
@@ -469,6 +507,10 @@ class VoiceCloner:
         mesmo motivo de `convert_speaker`: o Seed-VC reprocessa a referência a
         cada chamada, e estatísticas de F0 calculadas sobre a voz certa saem
         melhores do que sobre a conversa inteira.
+
+        separar_voz tira a música e o ruído antes de converter e devolve o fundo
+        por cima no fim. Vale quando há trilha sonora por baixo da fala — o
+        extrator de F0 e o encoder de conteúdo sofrem bastante com fundo.
         """
         source_p = Path(source_audio_path)
         if not source_p.exists():
@@ -506,6 +548,10 @@ class VoiceCloner:
         if orig_sr != sr:
             import librosa
             audio = librosa.resample(audio, orig_sr=orig_sr, target_sr=sr)
+
+        fundo = None
+        if separar_voz:
+            audio, fundo = self._separar_voz(audio, sr)
 
         # Achata tudo numa linha do tempo única e corta sobreposição: dois
         # falantes ocupando o mesmo instante nao teria como ser remontado.
@@ -660,6 +706,7 @@ class VoiceCloner:
             pecas.append(audio[cursor:].copy())
 
         resultado = np.concatenate(pecas) if pecas else audio
+        resultado = self._somar_fundo(resultado, fundo)
         pico = float(np.abs(resultado).max())
         if pico > 0.99:
             resultado = resultado * (0.99 / pico)
@@ -691,7 +738,8 @@ class VoiceCloner:
         progress_cb=None,
         engine: str = "f5",          # 'f5' (ASR->TTS) ou 'seedvc' (VC quadro a quadro)
         f0_condition: bool = True,   # so no seedvc: preserva a curva de pitch
-        diffusion_steps: int = 25    # so no seedvc
+        diffusion_steps: int = 25,   # so no seedvc
+        separar_voz: bool = False    # tira musica/ruido antes de converter
     ) -> tuple[np.ndarray, int, list[dict]]:
         """
         MODO 3: troca a voz de UM falante numa conversa, numa passada só.
@@ -763,6 +811,10 @@ class VoiceCloner:
 
         # A referência é preparada uma vez só: recortar e transcrever a cada
         # trecho seria desperdício, e o F5 já cacheia o recorte por hash.
+        fundo = None
+        if separar_voz:
+            audio, fundo = self._separar_voz(audio, sr)
+
         # O Seed-VC não usa texto nenhum: dispensa transcrever a referência.
         if engine == "f5":
             ref_file, ref_text = self._prepare_reference(target_p, target_ref_text)
@@ -983,6 +1035,7 @@ class VoiceCloner:
             pieces.append(audio[cursor:].copy())
 
         result = np.concatenate(pieces) if pieces else audio
+        result = self._somar_fundo(result, fundo)
         peak = float(np.abs(result).max())
         if peak > 0.99:
             result = result * (0.99 / peak)

@@ -78,14 +78,30 @@ A aplicação conta com três módulos principais e uma interface gráfica deskt
    - **Abre MP4 direto** (também MKV, MOV, AVI, WEBM): a trilha é extraída para um WAV temporário, a onda e a conversão trabalham nele, e o vídeo original fica guardado.
    - Com vídeo aberto, aparece **🎞️ Salvar MP4**: grava o vídeo com a trilha nova. O fluxo de imagem é **copiado sem recodificar** (`-c:v copy`) — rápido e sem perda. Abrindo só áudio, o botão não aparece.
    - **Arrastar e soltar**: jogue o arquivo em cima da onda (ela realça) ou em qualquer campo de caminho das outras abas.
+   - **Separar voz do fundo** (opcional): tira música e ruído com o Demucs, converte só a voz e devolve o fundo por cima. Desligado por padrão — ver a modalidade 6.
    - A marcação salva em `.json`, para retomar o trabalho depois sem remarcar tudo.
    - Existe porque a diarização automática erra a contagem de falantes em material difícil (ver problema **#20**). Aqui você manda.
 
-6. **🏋️ Modo de Treinamento / Fine-Tuning**:
+6. **🎚️ Separação de voz e fundo (caixa opcional)**:
+   - Disponível nas abas **Troca de Falante** e **Editor de Cena**, e na CLI com `--separar_voz`.
+   - Usa o **Demucs (`htdemucs`)**. Ele devolve quatro fontes, mas elas somam a mistura, então não é preciso separar as quatro e remixar três à mão: `resto = mistura − voz`. É o que o `--two-stems` faz por baixo.
+   - **Por que importa**: sem separar, o Seed-VC converte a música junto e ela vira som de voz. Medido com música 6 dB abaixo da fala — correlação da música da saída com a original:
+
+     | fundo sob a fala | separar | música preservada | correlação de F0 |
+     |---|---|---|---|
+     | 6 dB | não | **−0,003** (destruída) | +0,941 |
+     | 6 dB | **sim** | **+0,832** | **+0,980** |
+     | 0 dB | não | −0,001 | +0,937 |
+     | 0 dB | **sim** | **+0,875** | +0,931 |
+
+   - ⚠️ **Cuidado com a métrica de similaridade de locutor** neste caso: sem separação ela sai *mais alta* (0,716 contra 0,430 a 6 dB), mas só porque a música virou voz e passou a contar como voz alvo. Não é qualidade, é destruição do fundo.
+   - **Desligado por padrão**: custa ~5x tempo real na GPU e não faz falta em gravação limpa. Ligue quando houver trilha sonora sob a fala.
+
+7. **🏋️ Modo de Treinamento / Fine-Tuning**:
    - Permite treinar ou refinar modelos com datasets de áudio locais.
    - Suporte a Média Móvel Exponencial de Pesos (**EMA**) para estabilidade e **Mixed Precision (AMP)** para máxima eficiência na GPU.
 
-7. **🖥️ Interface Gráfica Desktop & Inicializador**:
+8. **🖥️ Interface Gráfica Desktop & Inicializador**:
    - Desenvolvida em **PyQt6** com tema escuro profissional.
    - Sete abas: TTS, Áudio ➔ Áudio, **🎭 Troca de Falante**, **👥 Personagens**, **🎬 Editor de Cena**, Treinamento e Status.
    - Todas as abas de conteúdo ficam dentro de uma área rolável: em tela pequena elas rolam em vez de espremer os widgets.
@@ -102,6 +118,7 @@ A aplicação conta com três módulos principais e uma interface gráfica deskt
 - **Matching Paradigm**: Conditional Flow Matching (**CFM**) com amostragem via Ordinary Differential Equation (**ODE**) solvers (Euler / Midpoint).
 - **Language Foundation Model**: `F5-TTS Brazilian Portuguese` (`model_stable.safetensors`), especializado em dicção e fonética brasileira. Carregado com a arquitetura **`F5TTS_Base` (v0)**, que é aquela em que foi treinado — ver problema **#7**.
 - **Audio Decoding / Vocoder**: `Vocos` neural vocoder a 24.000 Hz, eliminando artefatos metálicos e robóticos comuns em modelos anteriores (como RVC ou So-VITS).
+- **Separação de Fontes**: `Demucs htdemucs` para isolar a voz do fundo antes da conversão. Opcional, desligado por padrão.
 - **Vídeo**: `ffmpeg` (via `inference/media.py`) para extrair a trilha e remontar o MP4. A imagem nunca é recodificada.
 - **Voice Conversion**: `Seed-VC` (`Plachta/Seed-VC` + `BigVGAN v2 44kHz` + `RMVPE` para F0), quadro a quadro e zero-shot. Motor padrão da Troca de Falante — preserva duração e entoação, ao contrário do caminho ASR ➔ TTS.
 - **Speaker Diarization**: `pyannote/speaker-diarization-3.1` (via `pyannote.audio` **3.3.2**) para descobrir quantos falantes existem e rotular cada trecho. Requer aceitar os termos no HuggingFace — ver problema **#11**.
@@ -136,6 +153,9 @@ Abaixo estão detalhados todos os problemas encontrados durante o desenvolviment
 | **20** | **Diarizacao automatica errando a contagem de falantes** | Numa esquete com Chaves, Quico e Seu Madruga o `pyannote` detectou 2 vozes em vez de 3. Vozes parecidas, muita sobreposicao e fundo musical confundem o modelo — e forcar `num_speakers` nem sempre acerta as fronteiras. O caminho era converter os tres por completo e depois cortar num editor externo. | Nova aba **Editor de Cena**: forma de onda com regioes marcadas a mao, N falantes, um personagem para cada, e a mixagem sai pronta numa passada. Backend em `convert_segments()`, que generaliza `convert_speaker()` para varios falantes com trechos vindos de fora em vez da diarizacao. | ✅ Resolvido |
 | **21** | **Widget de forma de onda sem dependencia nova** | Plotar a onda pediria `pyqtgraph` ou `matplotlib`; o primeiro e mais uma dependencia para um uso so, e o segundo tem interacao ruim para arrastar bordas de regiao. | `gui_waveform.py`: `QWidget` proprio que desenha no `paintEvent`. Um resumo de picos a 200 baldes/segundo e agregado por coluna de pixel com `np.minimum.reduceat`, o que mantem o desenho leve mesmo num arquivo de 20 minutos, e a interacao (criar, mover, redimensionar, zoom) fica sob controle total. | ✅ Resolvido |
 | **22** | **Vaivem para trabalhar com video** | O material de origem e sempre MP4, mas o app so abria audio: era preciso extrair a trilha a mao antes e casar o audio novo com o video depois, num editor. | `inference/media.py` com o ffmpeg (ja instalado na maquina, sem dependencia nova). Abrir MP4 extrai a trilha para um WAV temporario; o botao **Salvar MP4** remonta o video com o audio novo usando `-c:v copy`, que copia o fluxo de imagem sem recodificar. Verificado: `codec_name`, resolucao e `nb_frames` identicos entre entrada e saida, e a trilha do MP4 final bate com a mix (correlacao +1.000) e nao com o original (-0.009). | ✅ Resolvido |
+| **23** | **Musica e plateia degradando a conversao** | O extrator de F0 e o encoder de conteudo do Seed-VC sofrem com fundo sonoro. Pior: sem separar, o modelo **converte a musica junto** e ela vira som de voz — medido com musica 6 dB abaixo da fala, a correlacao da musica da saida com a original ficou em **-0,003**, ou seja, destruida. | `inference/separator.py` com o Demucs, ligavel pela caixa 'Separar voz do fundo' e por `--separar_voz`. Converte so a voz e soma o fundo original por cima no fim — ele nunca passa por nenhum modelo. Resultado a 6 dB: musica preservada **+0,832** e correlacao de F0 de 0,941 para **0,980**. Nao precisa remixar 3 stems: as fontes do Demucs somam a mistura, entao `resto = mistura - voz`. | ✅ Resolvido |
+| **24** | **Similaridade de locutor enganando na presenca de fundo** | Ao comparar com e sem separacao, a similaridade com a voz alvo saiu **maior sem separar** (0,716 contra 0,430 a 6 dB), o que sugeriria que separar piora. | A metrica estava medindo a coisa errada: sem separacao a musica e convertida em voz e passa a contar como voz alvo no embedding. A medida certa e quanto do fundo sobrevive como fundo — e ai a separacao ganha de longe. Fica o registro para nao cair de novo nessa leitura. | ✅ Resolvido |
+| **25** | **Primeiro teste de separacao nao mostrou ganho nenhum** | Num trecho de TV com 32,5% de fundo na janela, converter com e sem separacao deu praticamente o mesmo resultado (+0,631 contra +0,632). | A medicao do fundo era da **janela inteira**, nao dos trechos de fala. Medindo trecho a trecho, os tres marcados tinham **0,0% de fundo** — a musica estava *entre* as falas, nao por baixo. O ganho so aparece quando ha fundo sob a voz, o que exigiu um teste controlado misturando musica em SNR conhecido. | ✅ Resolvido |
 | **10** | **Referências de demo em `data/demo_speaker/` não contêm fala** | Os quatro `.wav` (todos com exatos 3,50s) são tons sintéticos harmônicos (~150/300/450 Hz) da fase inicial do projeto, e os `.txt` irmãos declaram 90 bytes de texto que o áudio nunca fala. Qualquer teste com eles produz resultado ruim mesmo com o pipeline correto. | Usar referências de fala real (ex.: `dataset/silvio/silvio.mp3`) para avaliar qualidade. Pendente substituir os arquivos de demo. | ⚠️ Conhecido |
 
 ---

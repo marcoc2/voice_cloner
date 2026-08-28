@@ -58,6 +58,10 @@ def main():
                              "Preserva menos a entoação; use se o resultado com F0 sair instável.")
     parser.add_argument("--diffusion_steps", type=int, default=25,
                         help="Passos de difusão do Seed-VC (10-50). Mais passos = melhor e mais lento.")
+    parser.add_argument("--separar_voz", action="store_true",
+                        help="Tira música e ruído de fundo antes de converter (Demucs) e devolve o fundo "
+                             "por cima no fim. Sem isso, o modelo converte a música junto e ela vira "
+                             "som de voz. Só vale quando há fundo por baixo da fala.")
     
     args = parser.parse_args()
 
@@ -139,7 +143,8 @@ def main():
             seed=args.seed,
             engine=args.engine,
             f0_condition=not args.no_f0,
-            diffusion_steps=args.diffusion_steps
+            diffusion_steps=args.diffusion_steps,
+            separar_voz=args.separar_voz
         )
 
     elif args.source_audio:
